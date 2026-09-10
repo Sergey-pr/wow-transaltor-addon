@@ -2,7 +2,6 @@
 
 import os
 import re
-import time
 from dataclasses import dataclass
 
 # Where Blizzard installs WoW by default. The flavor folder differs per client:
@@ -19,7 +18,7 @@ SEARCH_ROOTS = [
     r"E:\Games\World of Warcraft",
 ]
 
-FLAVORS = ["_classic_", "_classic_era_", "_classic_ptr_", "_retail_"]
+FLAVORS = ["_anniversary_", "_classic_", "_classic_era_", "_classic_ptr_", "_retail_"]
 
 
 def find_chat_log():
@@ -57,6 +56,19 @@ _TO = re.compile(r"^To (?P<sender>[^:]+?): (?P<text>.+)$")
 # Channel names we never want to translate.
 NOISE = ("loot", "system", "combat", "skill", "currency", "money")
 
+# The client writes its own markup into the log. Guild lines arrive as
+# "|Hchannel:GUILD|h[Guild]|h Naam: bericht", and item links inside a message
+# body look the same, so the display text is kept and the wrapper dropped.
+_HYPERLINK = re.compile(r"\|H.*?\|h(.*?)\|h")
+_COLOR = re.compile(r"\|c[0-9a-fA-F]{8}|\|r")
+_TEXTURE = re.compile(r"\|T.*?\|t")
+
+
+def strip_markup(text):
+    text = _HYPERLINK.sub(r"\1", text)
+    text = _COLOR.sub("", text)
+    return _TEXTURE.sub("", text)
+
 
 def _clean_sender(name):
     return name.split("-")[0].strip()
@@ -69,6 +81,8 @@ def parse_line(line):
         return None
 
     body = _TIMESTAMP.sub("", raw).strip()
+    if "|" in body:
+        body = strip_markup(body).strip()
     if not body:
         return None
 
@@ -95,12 +109,14 @@ def parse_line(line):
     return None
 
 
-class LogTailer:
-    """Follows the chat log the way `tail -f` does, surviving rotation and truncation."""
+class LogReader:
+    """Reads the chat log in bites, remembering where it stopped.
 
-    def __init__(self, path, from_start=False, poll=0.25):
+    Survives the rotation and truncation the client does between sessions.
+    """
+
+    def __init__(self, path, from_start=False):
         self.path = path
-        self.poll = poll
         self.from_start = from_start
         self._handle = None
         self._inode = None
@@ -127,39 +143,42 @@ class LogTailer:
             return True
         return stat.st_size < self._handle.tell()
 
-    def follow(self, stop_event):
-        """Yields ChatMessage objects until stop_event is set."""
-        while not stop_event.is_set():
+    def drain(self):
+        """Yields every message written since the last call, then returns.
+
+        Never blocks: the caller decides when to look again. The read position
+        is kept between calls, so the first call replays the whole log and each
+        later one hands over only what is new.
+        """
+        # Twice at most: a new session truncates the log, and the replacement
+        # has to be picked up in this same call rather than the next one.
+        for _ in range(2):
             if self._handle is None:
                 if not os.path.isfile(self.path):
-                    time.sleep(1.0)
-                    continue
+                    return
                 try:
                     self._open()
                 except OSError:
-                    time.sleep(1.0)
-                    continue
+                    return
 
-            line = self._handle.readline()
-            if line:
+            while True:
+                line = self._handle.readline()
+                if not line:
+                    break
                 if not line.endswith(b"\n"):
-                    # Partial write: rewind and wait for the rest of the line.
+                    # A half-written line: rewind and leave it for next time.
                     self._handle.seek(-len(line), os.SEEK_CUR)
-                    time.sleep(self.poll)
-                    continue
+                    return
                 message = parse_line(line.decode("utf-8", errors="replace"))
                 if message:
                     yield message
-                continue
 
-            if self._reopened():
-                self._handle.close()
-                self._handle = None
-                self.from_start = True
-                continue
+            if not self._reopened():
+                return
+            self.close()
+            self.from_start = True
 
-            time.sleep(self.poll)
-
+    def close(self):
         if self._handle:
             self._handle.close()
             self._handle = None

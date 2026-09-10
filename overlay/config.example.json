@@ -3,15 +3,38 @@
   "my_language": "en",
   "chat_log_path": "",
   "ollama_host": "http://127.0.0.1:11434",
-  "model": "qwen2.5:3b",
-  "timeout_seconds": 30,
+  "_model_help": "aya-expanse:8b is trained for translation and handles Dutch well. qwen2.5:3b is far faster but mistranslates or echoes the source on harder lines.",
+  "model": "aya-expanse:8b",
+  "timeout_seconds": 120,
   "workers": 2,
-  "translate_everything": false,
+
+  "_channels_help": "Filter which chat lines are shown. Empty [] = all channels. Names come from the chat log — examples below. Case-insensitive.",
+  "_channels_examples": [
+    "Trade",
+    "LookingForGroup",
+    "General",
+    "Guild",
+    "Say",
+    "Yell",
+    "Whisper",
+    "Whisper to",
+    "Party",
+    "Raid"
+  ],
   "channels": [],
+
   "ignore_senders": [],
   "geometry": "520x320+40+40",
   "compose_geometry": "480x300",
   "opacity": 0.88,
   "font_size": 10,
-  "max_lines": 200
+
+  "_max_lines_help": "Messages shown in the feed. The whole log is parsed on startup; the newest this many that pass the channel and sender filters are displayed, and the oldest drop off as new chat arrives.",
+  "max_lines": 200,
+
+  "_cards_help": "A new card first comes back after card_first_seconds; Right doubles the wait, Wrong halves it, clamped between the floor and the ceiling. The gap is the quiet stretch enforced between two popups.",
+  "card_gap_seconds": 180,
+  "card_first_seconds": 600,
+  "card_min_seconds": 60,
+  "card_max_days": 30
 }

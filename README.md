@@ -3,6 +3,9 @@
 Translates World of Warcraft TBC Anniversary chat with a local model, both
 directions, between any pair of languages. Nothing leaves your machine.
 
+Words you meet in chat can be turned into flashcards that come back on a
+spaced-repetition schedule, so the game doubles as vocabulary practice.
+
 ## Why not a button inside the chat frame
 
 WoW's Lua sandbox has no networking and no file access, so a model cannot run
@@ -17,12 +20,13 @@ than in the game's own chat frame.
 
 - `addon/ChatLogAuto/` — a tiny addon that keeps `/chatlog` enabled (the client
   resets it on every login). Optional; you can type `/chatlog` yourself instead.
-- `overlay/` — a Python app with three windows:
-  - **feed** — a translucent window over the game showing incoming messages
-    translated into your language;
+- `overlay/` — a Python app with four windows:
+  - **feed** — a translucent window over the game showing chat. Click a line to
+    translate it;
   - **write** — type in your language, get the text in the chat language,
     copied to the clipboard automatically, paste it in game with Ctrl+V;
-  - **⚙ settings** — languages, model and filters, applied live.
+  - **card** — one flashcard at a time, popping up when it falls due;
+  - **⚙ settings** — languages, model, filters and card timings, applied live.
 
 ## Setup
 
@@ -46,18 +50,36 @@ ollama list
 ### 2. The model
 
 ```bash
-ollama pull qwen2.5:3b
+ollama pull aya-expanse:8b
 ```
 
-Alternatives, if 3b is too slow or not good enough — put the name in settings
-after pulling:
+Model choice matters more than anything else here. Measured on Dutch guild
+chat, an i7-6700 with 16 GB RAM and a 2 GB GPU (so the CPU does the work):
 
-| Model | Size | Notes |
+| Model | Size | Median | Notes |
+|---|---|---|---|
+| `qwen2.5:3b` | ~2 GB | 1.9 s | Fast, but mangles ordinary lines |
+| `aya-expanse:8b` | ~5 GB | 5.3 s | Default. Cohere's translation model |
+| `qwen2.5:7b` | ~4.7 GB | — | Middle ground, not measured here |
+
+The size difference is not subtle. On the same sentences:
+
+| Dutch | `qwen2.5:3b` | `aya-expanse:8b` |
 |---|---|---|
-| `qwen2.5:1.5b` | ~1 GB | Fastest, weaker on slang |
-| `qwen2.5:3b` | ~2 GB | Default, good balance |
-| `qwen2.5:7b` | ~4.7 GB | Best quality, wants a GPU |
-| `gemma2:2b` | ~1.6 GB | Alternative if Qwen misbehaves |
+| `smegmaatje gaat ook mee` | `smegmaatje is ook meegegaan` | `smegmaatje is also coming along` |
+| `Bob gaat ook mee` | `Bob wants to as well` | `Bob is also coming along` |
+| `gaat ook mee` | `sounds good` | `goes along` |
+| `puggers zoeken en bt in` | `puggers wts en bt in` | `puggers seeking and BT in` |
+
+A 3B model is simply too small for Dutch: it often replies in the source
+language or invents a meaning. No amount of prompt wording fixes that.
+
+**Loading takes a while.** An 8B model needs about 25 seconds to come off disk
+on a machine without the VRAM to hold it. The overlay pays that cost at
+startup — the status bar shows `loading …` and then `ready` — and asks Ollama
+to keep the weights in memory for 30 minutes between translations. If you would
+rather it let go sooner, lower `KEEP_ALIVE` in `overlay/translate.py`; the
+trade is a 25-second pause the next time you click a line.
 
 ### 3. Python
 
@@ -84,41 +106,96 @@ package never has tkinter, so don't use it.
 
 ### 4. The addon
 
-Copy `addon/ChatLogAuto` into
-`World of Warcraft\_classic_\Interface\AddOns\`.
+Copy `addon/ChatLogAuto` into your client's `Interface\AddOns\`. The flavour
+folder depends on the client — Anniversary is `_anniversary_`:
+
+```
+World of Warcraft\_anniversary_\Interface\AddOns\ChatLogAuto\
+```
 
 If the character screen marks it out of date, tick "Load out of date addons".
-The `.toc` says `## Interface: 20504` and Anniversary may run a newer build; to
-get the exact number, type `/dump select(4, GetBuildInfo())` in game and put it
-in the `.toc`.
+The `.toc` says `## Interface: 20504`; to get the exact number for your build,
+type `/dump select(4, GetBuildInfo())` in game and put it in the `.toc`.
 
 Skipping the addon is fine — just type `/chatlog` in game after each login.
 
 ### 5. Run it
 
-Double-click `overlay\run.bat`, or from a terminal:
+Double-click **`overlay\run.vbs`**. From a terminal:
 
 ```bash
 python overlay\main.py
 ```
 
-`run.bat` launches through `pythonw`, which keeps a console window from hanging
-around. Run `main.py` directly when you want to see errors.
+`run.vbs` opens no console window at all. `run.bat` also works, but a `.bat`
+always flashes a console for a moment — Windows creates it before the script
+gets a say. Run `main.py` directly when you want to see errors.
 
 ### 6. In game
 
 Graphics → Display → **Windowed (Fullscreen)**. In exclusive fullscreen,
 Windows will not draw any window on top of the game.
 
-## Controls
+## Using it
 
-Drag the feed by its top bar, resize it from the `◢` corner. Buttons: `pause`
-stops taking new lines, `write` opens the composer, `⚙` opens settings, `clear`
-empties the feed, `−`/`+` change the font size, `✕` quits. Position, size and
-font size are remembered.
+### The feed
 
-In the composer: `Ctrl+Enter` translates, `Esc` closes. The result is copied to
-the clipboard on its own; `Copy` copies it again.
+The whole log is parsed at startup and the newest messages that pass your
+filters are shown — history included, not just what arrives afterwards.
+
+Nothing is translated on its own. **Click a line and its translation appears
+underneath it.** That keeps the model idle unless you actually want something,
+which matters when each request costs a few seconds.
+
+The feed does not follow the log by itself either. **`refresh`** reads whatever
+the client has written since the last look and appends it, leaving translations
+you already have in place.
+
+Drag the feed by its top bar, resize it from the `◢` corner.
+
+| Button | What it does |
+|---|---|
+| `refresh` | Read new chat since the last refresh |
+| `cards` | Open the deck editor |
+| `+card` | Make a card from the selected text |
+| `write` | Open the composer |
+| `⚙` | Settings |
+| `clear` | Empty the feed |
+| `−` `+` | Font size |
+| `▁` | Shrink to a small badge; click the badge to bring it back |
+| `✕` | Quit |
+
+Position, size and font size are remembered.
+
+### The composer
+
+`Ctrl+Enter` translates, `Esc` closes. The result is copied to the clipboard on
+its own; `Copy` copies it again.
+
+### Flashcards
+
+**Right-click any word in a chat line** to make a card from it. No selecting
+needed. For a phrase, select it and press `+card`.
+
+The card stores the word, the sentence it came from, and a translation of each.
+Cards are looked up with a dictionary prompt rather than the chat one, which
+matters: asked as chat, a bare word tends to come back transliterated.
+
+A card pops up on its own when it falls due, one at a time. `Flip` (or Space)
+reveals both translations and swaps in `Wrong` / `Right` (or ←/→).
+
+- **Right** doubles the wait: 10 min → 20 → 40 → 80 …
+- **Wrong** halves it, down to the floor.
+
+The window never takes focus — it would drop you out of the game — so click it
+before using the keys.
+
+`cards` opens the deck: fix a translation the model got wrong, reset a card's
+timer, or delete it. The deck lives in `overlay/cards.json`.
+
+Cards are scheduled in wall-clock time, so closing the overlay does not reset
+anything. If a pile of them came due while it was closed, they are spaced out
+by `card_gap_seconds` rather than fired back to back.
 
 ## Languages
 
@@ -132,13 +209,10 @@ Incoming messages go Chat → My, the composer goes My → Chat. `Auto-detect`
 works only as the chat language: nothing can be translated *into* it, and the
 composer will ask you to pick a concrete language if you try.
 
-Lines already written in your language never reach the model — a filter based
-on common words and on the alphabet drops them first. If it guesses wrong, turn
-on `Translate every line`.
-
 ## Configuration
 
-`overlay/config.json` is created on first run; `⚙` edits the same values.
+`overlay/config.json` is created on first run; `⚙` edits the same values and
+applies them immediately, without a restart.
 
 | Key | What it does |
 |---|---|
@@ -146,24 +220,35 @@ on `Translate every line`.
 | `my_language` | Your language |
 | `chat_log_path` | Path to `WoWChatLog.txt`. Blank means auto-detect |
 | `model` | Ollama model |
+| `timeout_seconds` | Give a large model room to load — 120 by default |
 | `workers` | How many translations run in parallel |
-| `translate_everything` | `true` translates every line, skipping the language filter |
-| `channels` | Channel whitelist, e.g. `["Party", "Guild", "Whisper"]`. Empty means all |
+| `channels` | Channel whitelist, e.g. `["Guild", "Say", "Whisper"]`. Empty means all |
 | `ignore_senders` | Players whose messages are skipped |
+| `max_lines` | Messages kept in the feed |
 | `opacity` | Feed opacity, `0.0`–`1.0` |
+| `card_gap_seconds` | Quiet stretch enforced between two card popups |
+| `card_first_seconds` | How long a new card waits before its first showing |
+| `card_min_seconds` | Floor on the interval, so wrong answers cannot spam |
+| `card_max_days` | Ceiling on the interval |
 
+Channel names come from the log: `Trade`, `LookingForGroup`, `General`, `Guild`,
+`Say`, `Yell`, `Whisper`, `Whisper to`, `Party`, `Raid`. Case does not matter.
 Loot channels, system messages and skill-up lines are always dropped.
 
-Settings apply immediately, without a restart. The one exception is *lowering*
-`workers`: the surplus threads stay until you quit.
+Editing `config.json` by hand while the overlay is running is safe — on exit it
+writes back only the window layout and merges it into whatever the file says.
+
+Lowering `workers` is the one setting that needs a restart: the surplus threads
+stay until you quit.
 
 ## Known limits
 
 - Translations show up in the overlay, not in the game's chat frame. That is an
   API limit, not a bug.
-- Latency is the model's response time, usually 0.3–1 s on a GPU.
-- Repeated phrases come back from cache instantly.
-- Lines already in the log are not read retroactively — only what arrives after
-  the app starts.
+- Latency is the model's response time: about 5 s for `aya-expanse:8b` on a CPU,
+  under 2 s for a 3B model or on a GPU that fits the weights. Repeated phrases
+  come back from cache instantly.
 - Outgoing text is pasted into the game by hand with Ctrl+V. The addon cannot
   type in chat for you; automating chat output gets accounts banned.
+- Card translations are only as good as the model. Check new cards in the deck
+  editor and fix the ones it fumbled.

@@ -6,22 +6,29 @@ import os
 import queue
 import sys
 import threading
+import time
 
+import cards
 import chatlog
 import translate
 import ui
 
-CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+HERE = os.path.dirname(os.path.abspath(__file__))
+CONFIG_PATH = os.path.join(HERE, "config.json")
+CARDS_PATH = os.path.join(HERE, "cards.json")
+
+CARD_POLL_MS = 15000
 
 DEFAULTS = {
     "chat_language": "nl",
     "my_language": "en",
     "chat_log_path": "",
     "ollama_host": "http://127.0.0.1:11434",
-    "model": "qwen2.5:3b",
-    "timeout_seconds": 30,
+    "model": "aya-expanse:8b",
+    # Generous on purpose: loading an 8B model off disk can take half a minute
+    # on a machine without the VRAM to hold it.
+    "timeout_seconds": 120,
     "workers": 2,
-    "translate_everything": False,
     "channels": [],
     "ignore_senders": [],
     "geometry": "520x320+40+40",
@@ -29,7 +36,20 @@ DEFAULTS = {
     "opacity": 0.88,
     "font_size": 10,
     "max_lines": 200,
+    # Quiet stretch between two cards. Their own doubling schedule usually
+    # spaces them out anyway; this only bites when a backlog piled up while
+    # the overlay was closed, so a night away is not a burst of popups.
+    "card_gap_seconds": 180,
+    "card_first_seconds": 600,
+    "card_min_seconds": 60,
+    "card_max_days": 30,
 }
+
+
+def card_bounds(config):
+    return (int(config["card_first_seconds"]),
+            int(config["card_min_seconds"]),
+            int(config["card_max_days"]) * 86400)
 
 
 def load_config():
@@ -53,6 +73,28 @@ def save_config(config):
         print("Could not write config.json: %s" % exc)
 
 
+# What the window owns and nothing else does. Everything else in the file
+# belongs to the settings dialog, which writes it the moment it changes.
+LAYOUT_KEYS = ("geometry", "font_size", "compose_geometry", "chat_log_path")
+
+
+def save_layout(config):
+    """Writes back the window layout without touching the rest of the file.
+
+    Quitting used to dump the whole in-memory config, which silently undid any
+    edit made to config.json while the overlay happened to be running.
+    """
+    on_disk = dict(DEFAULTS)
+    if os.path.isfile(CONFIG_PATH):
+        try:
+            with open(CONFIG_PATH, "r", encoding="utf-8") as handle:
+                on_disk.update(json.load(handle))
+        except (OSError, ValueError):
+            pass            # unreadable: fall back to what we hold
+    on_disk.update({key: config[key] for key in LAYOUT_KEYS})
+    save_config(on_disk)
+
+
 def main():
     config = load_config()
 
@@ -60,9 +102,12 @@ def main():
     events = queue.Queue()      # -> UI thread
     work = queue.Queue()        # incoming chat lines -> translation workers
     ids = itertools.count(1)
-    pending = {}                # id -> text mark in the Text widget
+    pending = {}                # work id -> text mark in the Text widget
+    originals = {}              # text mark -> the untranslated line
 
-    reader_stop = threading.Event()   # replaced whenever the log path changes
+    reader = [None]             # the open LogReader, replaced when the path changes
+    primed = [False]            # has the first, whole-log pass happened yet
+    refreshing = [False]        # guards against overlapping refreshes
     worker_count = [0]
 
     def on_close():
@@ -71,7 +116,46 @@ def main():
         config["font_size"] = window.font_size
         config["compose_geometry"] = composer.geometry()
         stop_event.set()
-        reader_stop.set()
+        if reader[0]:
+            reader[0].close()
+
+    def on_translate(mark):
+        text = originals.get(mark)
+        if not text:
+            return
+        work_id = next(ids)
+        pending[work_id] = mark
+        work.put((work_id, text, config["chat_language"], config["my_language"]))
+
+    def on_card(word, mark):
+        """Turns a picked word into a card, translating it off the UI thread."""
+        sentence = originals.get(mark)
+        if not sentence:
+            return
+        source, target = config["chat_language"], config["my_language"]
+        if target == "auto" or source == target:
+            events.put(("status", "set a chat and my language first", True))
+            return
+        if deck.has_word(word, source):
+            events.put(("status", "'%s' is already in the deck" % word, False))
+            return
+
+        events.put(("status", "making a card for '%s'…" % word, False))
+
+        def build():
+            card = deck.new_card(
+                word=word,
+                sentence=sentence,
+                word_translation=translator.translate_word(word, sentence, source, target) or "",
+                sentence_translation=translator.translate(sentence, source, target) or "",
+                source=source,
+                target=target,
+            )
+            deck.add(card)
+            events.put(("status", "card %d: '%s' — due in %d min"
+                        % (len(deck), word, card.interval // 60), False))
+
+        threading.Thread(target=build, daemon=True).start()
 
     window = ui.Overlay(
         geometry=config["geometry"],
@@ -81,7 +165,13 @@ def main():
         on_close=on_close,
         on_compose=lambda: composer.show(),
         on_settings=lambda: settings.show(),
+        on_translate=on_translate,
+        on_card=on_card,
+        on_refresh=lambda: refresh(),
+        on_cards=lambda: editor.show(),
     )
+
+    deck = cards.Deck(CARDS_PATH, *card_bounds(config))
 
     translator = translate.Translator(
         host=config["ollama_host"],
@@ -91,29 +181,36 @@ def main():
 
     # ------------------------------------------------------------- producers
 
-    def reader(path, local_stop):
-        tailer = chatlog.LogTailer(path)
-        for message in tailer.follow(local_stop):
-            if stop_event.is_set():
-                break
-            if window.paused:
-                continue
+    def keep(message):
+        """Filters are read fresh so settings apply without a restart."""
+        channels = [c.lower() for c in config["channels"]]
+        if channels and message.channel.lower() not in channels:
+            return False
+        return message.sender.lower() not in {s.lower()
+                                              for s in config["ignore_senders"]}
 
-            # Filters are read fresh each line so settings apply without a restart.
-            channels = [c.lower() for c in config["channels"]]
-            if channels and message.channel.lower() not in channels:
-                continue
-            if message.sender.lower() in {s.lower() for s in config["ignore_senders"]}:
-                continue
+    def refresh():
+        """Reads whatever the client has written since the last look."""
+        if reader[0] is None or refreshing[0]:
+            return
+        refreshing[0] = True
+        log, first = reader[0], not primed[0]
+        primed[0] = True
 
-            source, target = config["chat_language"], config["my_language"]
-            if not config["translate_everything"] and \
-                    not translate.should_translate(message.text, source, target):
-                continue
+        def run():
+            try:
+                # The first pass replays the whole log, so only the newest
+                # survivors are worth painting; later passes are just the tail.
+                fresh = [m for m in log.drain() if keep(m)]
+                if first:
+                    fresh = fresh[-int(config["max_lines"]):]
+                for message in fresh:
+                    events.put(("new", None, message))
+                events.put(("refreshed", len(fresh), first))
+            finally:
+                refreshing[0] = False
 
-            message_id = next(ids)
-            events.put(("new", message_id, message))
-            work.put((message_id, message.text, source, target))
+        threading.Thread(target=run, daemon=True).start()
 
     def worker():
         while not stop_event.is_set():
@@ -138,7 +235,15 @@ def main():
 
     def check_ollama():
         ok, detail = translator.available()
-        events.put(("status", "listening" if ok else detail, not ok))
+        if not ok:
+            events.put(("status", detail, True))
+            return
+        # Pay the weight-loading wait here rather than on the first click.
+        events.put(("status", "loading %s…" % config["model"], False))
+        warmed = translator.warm() is not None
+        events.put(("status", "ready" if warmed
+                    else "%s did not answer — is it too big for this machine?"
+                         % config["model"], not warmed))
 
     def start_workers(count):
         while worker_count[0] < count:
@@ -154,14 +259,17 @@ def main():
                                "then set the chat log path in settings.")
             return
         config["chat_log_path"] = path
-        threading.Thread(target=reader, args=(path, reader_stop), daemon=True).start()
+        if reader[0]:
+            reader[0].close()
+        reader[0] = chatlog.LogReader(path, from_start=True)
+        primed[0] = False
+        refresh()
         window.set_status("connecting to Ollama…")
         threading.Thread(target=check_ollama, daemon=True).start()
 
     # -------------------------------------------------------------- settings
 
     def apply_settings(updated):
-        nonlocal reader_stop
         path_changed = updated["chat_log_path"] != config["chat_log_path"]
 
         config.update(updated)
@@ -174,11 +282,11 @@ def main():
         window.set_direction(config["chat_language"], config["my_language"])
         composer.set_direction(config["my_language"], config["chat_language"])
         settings.config = config
+        deck.set_bounds(*card_bounds(config))
         start_workers(int(config["workers"]))
 
         if path_changed:
-            reader_stop.set()
-            reader_stop = threading.Event()
+            window.clear()
             start_reader()
         else:
             window.set_status("settings saved — checking Ollama…")
@@ -189,18 +297,53 @@ def main():
     settings = ui.Settings(window.root, config, apply_settings,
                            models_provider=translator.installed_models)
 
+    # ----------------------------------------------------------- flashcards
+
+    # Counts from launch, so starting the overlay does not fire a card instantly.
+    quiet_until = [time.monotonic() + int(config["card_gap_seconds"])]
+
+    def on_answer(card, correct):
+        deck.answer(card, correct)
+        quiet_until[0] = time.monotonic() + int(config["card_gap_seconds"])
+        window.set_status("%s — '%s' returns in %d min"
+                          % ("right" if correct else "wrong",
+                             card.word, card.interval // 60))
+
+    popup = ui.CardPopup(window.root, on_answer)
+    editor = ui.CardEditor(window.root, deck)
+
+    def review():
+        # One card at a time, and never before the quiet stretch since the
+        # last one has run out.
+        if not popup.busy and time.monotonic() >= quiet_until[0]:
+            due = deck.due_card()
+            if due is not None and popup.show(due):
+                quiet_until[0] = time.monotonic() + int(config["card_gap_seconds"])
+        if not stop_event.is_set():
+            window.root.after(CARD_POLL_MS, review)
+
     # -------------------------------------------------------------- UI pump
 
     def pump():
+        added = False
         try:
             while True:
                 kind, first, second = events.get_nowait()
 
                 if kind == "new":
-                    pending[first] = window.add_message(
+                    mark = window.add_message(
                         second.channel, second.sender, second.text)
+                    if mark:
+                        added = True
+                        originals[mark] = second.text
+                        # Marks for trimmed-away lines are unreachable; drop the
+                        # oldest so a long session does not accumulate them.
+                        while len(originals) > config["max_lines"]:
+                            originals.pop(next(iter(originals)))
 
                 elif kind == "done":
+                    # The source line is deliberately kept: a card can still be
+                    # cut out of a message long after it has been translated.
                     mark = pending.pop(first, None)
                     if second is None:
                         window.set_translation(mark, "(translation failed)", failed=True)
@@ -215,10 +358,21 @@ def main():
                     else:
                         composer.set_result(first)
 
+                elif kind == "refreshed":
+                    window.refresh_done()
+                    if second:
+                        window.set_status("%d message(s)" % first)
+                    else:
+                        window.set_status("%d new" % first if first
+                                          else "nothing new")
+
                 elif kind == "status":
                     window.set_status(first, error=second)
         except queue.Empty:
             pass
+
+        if added:
+            window.scroll_to_end()
 
         if not stop_event.is_set():
             window.root.after(80, pump)
@@ -230,13 +384,18 @@ def main():
     start_reader()
 
     window.root.after(80, pump)
+    window.root.after(CARD_POLL_MS, review)
+
+    if len(deck):
+        window.set_status("%d card(s) in the deck" % len(deck))
 
     try:
         window.root.mainloop()
     finally:
         stop_event.set()
-        reader_stop.set()
-        save_config(config)
+        if reader[0]:
+            reader[0].close()
+        save_layout(config)
 
 
 if __name__ == "__main__":

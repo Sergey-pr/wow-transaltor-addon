@@ -1,4 +1,7 @@
 __pycache__/
 *.pyc
 overlay/config.json
+overlay/cards.json
 .idea/
+# Shortcuts hardcode absolute paths, so they are per-machine.
+*.lnk

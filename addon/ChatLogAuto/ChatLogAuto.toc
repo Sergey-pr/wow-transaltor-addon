@@ -1,4 +1,4 @@
-## Interface: 20504
+## Interface: 20505
 ## Title: Chat Log Auto
 ## Notes: Keeps /chatlog enabled so the translator overlay always has a live feed.
 ## Author: sergei
