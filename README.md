@@ -26,14 +26,63 @@ than in the game's own chat frame.
 
 ## Setup
 
-**1. Ollama and the model**
+### 1. Ollama
 
+Pick whichever you already use — they all install the same thing.
+
+| Method | Command |
+|---|---|
+| Installer | Download [OllamaSetup.exe](https://ollama.com/download/windows) and run it |
+| winget | `winget install Ollama.Ollama` |
+| Chocolatey | `choco install ollama` |
+| Scoop | `scoop install ollama` |
+
+Ollama runs as a background service and starts with Windows. Check it is up:
+
+```bash
+ollama list
 ```
-winget install Ollama.Ollama
+
+### 2. The model
+
+```bash
 ollama pull qwen2.5:3b
 ```
 
-**2. The addon**
+Alternatives, if 3b is too slow or not good enough — put the name in settings
+after pulling:
+
+| Model | Size | Notes |
+|---|---|---|
+| `qwen2.5:1.5b` | ~1 GB | Fastest, weaker on slang |
+| `qwen2.5:3b` | ~2 GB | Default, good balance |
+| `qwen2.5:7b` | ~4.7 GB | Best quality, wants a GPU |
+| `gemma2:2b` | ~1.6 GB | Alternative if Qwen misbehaves |
+
+### 3. Python
+
+The app uses only the standard library, but it needs **tkinter**, which not
+every Python build ships.
+
+| Method | Command |
+|---|---|
+| Installer | [python.org/downloads/windows](https://www.python.org/downloads/windows/) — tick "tcl/tk and IDLE" and "Add python.exe to PATH" |
+| winget | `winget install Python.Python.3.12` |
+| Chocolatey | `choco install python` |
+| Scoop | `scoop install python` |
+
+Verify tkinter is there before going further:
+
+```bash
+python -c "import tkinter; print(tkinter.TkVersion)"
+```
+
+If that prints a version, you are set. If it raises
+`ModuleNotFoundError: No module named '_tkinter'`, that build has no Tk —
+install the python.org one, which always includes it. The embeddable ZIP
+package never has tkinter, so don't use it.
+
+### 4. The addon
 
 Copy `addon/ChatLogAuto` into
 `World of Warcraft\_classic_\Interface\AddOns\`.
@@ -43,13 +92,20 @@ The `.toc` says `## Interface: 20504` and Anniversary may run a newer build; to
 get the exact number, type `/dump select(4, GetBuildInfo())` in game and put it
 in the `.toc`.
 
-**3. The overlay**
+Skipping the addon is fine — just type `/chatlog` in game after each login.
 
-Needs Python 3.8+ from the python.org Windows installer — that build ships
-tkinter, the Microsoft Store build does not. Start it by double-clicking
-`overlay\run.bat`.
+### 5. Run it
 
-**4. In game**
+Double-click `overlay\run.bat`, or from a terminal:
+
+```bash
+python overlay\main.py
+```
+
+`run.bat` launches through `pythonw`, which keeps a console window from hanging
+around. Run `main.py` directly when you want to see errors.
+
+### 6. In game
 
 Graphics → Display → **Windowed (Fullscreen)**. In exclusive fullscreen,
 Windows will not draw any window on top of the game.
