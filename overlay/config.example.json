@@ -1,0 +1,17 @@
+{
+  "chat_language": "nl",
+  "my_language": "en",
+  "chat_log_path": "",
+  "ollama_host": "http://127.0.0.1:11434",
+  "model": "qwen2.5:3b",
+  "timeout_seconds": 30,
+  "workers": 2,
+  "translate_everything": false,
+  "channels": [],
+  "ignore_senders": [],
+  "geometry": "520x320+40+40",
+  "compose_geometry": "480x300",
+  "opacity": 0.88,
+  "font_size": 10,
+  "max_lines": 200
+}
