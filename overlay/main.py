@@ -1,4 +1,11 @@
-"""Entry point: tails the WoW chat log, translates locally, shows an overlay."""
+"""Entry point: reads WoW chat, translates locally on demand, shows an overlay.
+
+Chat arrives one of two ways. The pixel bridge is live: the companion addon
+paints each message into a strip of coloured cells and this reads it straight
+off the screen. Failing that, the client's own chat log still works, but the
+client buffers it in blocks, so lines can lag by minutes and have to be pulled
+in with the refresh button.
+"""
 
 import itertools
 import json
@@ -10,6 +17,8 @@ import time
 
 import cards
 import chatlog
+import pixelbridge
+import screengrab
 import translate
 import ui
 
@@ -18,6 +27,8 @@ CONFIG_PATH = os.path.join(HERE, "config.json")
 CARDS_PATH = os.path.join(HERE, "cards.json")
 
 CARD_POLL_MS = 15000
+BRIDGE_POLL = 0.03          # ~30 Hz; the addon holds each message for 0.10 s
+BRIDGE_RESCAN = 3.0         # seconds between full-screen hunts for the strip
 
 DEFAULTS = {
     "chat_language": "nl",
@@ -31,7 +42,9 @@ DEFAULTS = {
     "workers": 2,
     "channels": [],
     "ignore_senders": [],
-    "geometry": "520x320+40+40",
+    # Clear of the top-left corner: that is where the addon paints its strip,
+    # and covering it cuts the live feed.
+    "geometry": "520x320+200+60",
     "compose_geometry": "480x300",
     "opacity": 0.88,
     "font_size": 10,
@@ -44,6 +57,27 @@ DEFAULTS = {
     "card_min_seconds": 60,
     "card_max_days": 30,
 }
+
+
+def log_age(path):
+    """Seconds since the client last committed anything to the log.
+
+    The client buffers chat and writes it out in blocks, so a refresh can
+    legitimately find nothing new. Showing the age separates "the game has
+    not written yet" from "the overlay is stuck".
+    """
+    try:
+        return max(0.0, time.time() - os.path.getmtime(path))
+    except OSError:
+        return None
+
+
+def human_age(seconds):
+    if seconds is None:
+        return "unknown"
+    if seconds < 90:
+        return "%ds" % int(seconds)
+    return "%dm" % int(seconds // 60)
 
 
 def card_bounds(config):
@@ -104,6 +138,13 @@ def main():
     ids = itertools.count(1)
     pending = {}                # work id -> text mark in the Text widget
     originals = {}              # text mark -> the untranslated line
+
+    bridge_state = [("looking for the pixel bridge…", False)]
+    model_state = [("loading model…", False)]
+
+    def show_state():
+        text = "%s · %s" % (bridge_state[0][0], model_state[0][0])
+        window.set_status(text, error=bridge_state[0][1] or model_state[0][1])
 
     reader = [None]             # the open LogReader, replaced when the path changes
     primed = [False]            # has the first, whole-log pass happened yet
@@ -183,6 +224,8 @@ def main():
 
     def keep(message):
         """Filters are read fresh so settings apply without a restart."""
+        if message.channel == "Bridge test":
+            return True     # /cpb test must show up whatever is filtered
         channels = [c.lower() for c in config["channels"]]
         if channels and message.channel.lower() not in channels:
             return False
@@ -206,11 +249,50 @@ def main():
                     fresh = fresh[-int(config["max_lines"]):]
                 for message in fresh:
                     events.put(("new", None, message))
-                events.put(("refreshed", len(fresh), first))
+                events.put(("refreshed", len(fresh), log_age(log.path)))
             finally:
                 refreshing[0] = False
 
         threading.Thread(target=run, daemon=True).start()
+
+    def bridge_loop():
+        """Live chat, straight off the screen. Survives the strip coming and
+        going: hiding the addon or covering the strip just drops back to
+        hunting for it again."""
+        bridge = pixelbridge.Bridge()
+        connected = False
+        missing_reported = False
+        last_scan = 0.0
+        try:
+            while not stop_event.is_set():
+                if bridge.origin is None:
+                    if connected:
+                        connected = False
+                        events.put(("bridge", False, None))
+                    if time.monotonic() - last_scan < BRIDGE_RESCAN:
+                        time.sleep(0.2)
+                        continue
+                    last_scan = time.monotonic()
+                    if bridge.locate():
+                        connected = True
+                        missing_reported = False
+                        events.put(("bridge", True, bridge.origin))
+                    elif not missing_reported:
+                        missing_reported = True
+                        events.put(("bridge", None, None))
+                    continue
+
+                found = bridge.read()
+                if found is None:
+                    time.sleep(BRIDGE_POLL)
+                    continue
+
+                channel, sender, text = found
+                message = chatlog.ChatMessage(channel, sender, text, "")
+                if keep(message):
+                    events.put(("new", None, message))
+        finally:
+            bridge.close()
 
     def worker():
         while not stop_event.is_set():
@@ -241,9 +323,7 @@ def main():
         # Pay the weight-loading wait here rather than on the first click.
         events.put(("status", "loading %s…" % config["model"], False))
         warmed = translator.warm() is not None
-        events.put(("status", "ready" if warmed
-                    else "%s did not answer — is it too big for this machine?"
-                         % config["model"], not warmed))
+        events.put(("model", warmed, None))
 
     def start_workers(count):
         while worker_count[0] < count:
@@ -360,11 +440,30 @@ def main():
 
                 elif kind == "refreshed":
                     window.refresh_done()
-                    if second:
-                        window.set_status("%d message(s)" % first)
-                    else:
-                        window.set_status("%d new" % first if first
-                                          else "nothing new")
+                    # second is how stale the log itself is. The client writes
+                    # in blocks, so "nothing new" usually means it has not
+                    # flushed yet rather than that the chat went quiet.
+                    window.set_status(
+                        "%s — game last wrote %s ago"
+                        % ("%d new" % first if first else "nothing new",
+                           human_age(second)),
+                        error=second is not None and second > 120 and not first)
+
+                elif kind == "bridge":
+                    # The two halves of the status are reported separately so
+                    # the model warming up cannot paint over the bridge state.
+                    bridge_state[0] = {
+                        True: ("live", False),
+                        False: ("pixel bridge lost — strip covered?", True),
+                        None: ("pixel bridge not found — /cpb on in game?", True),
+                    }[first]
+                    show_state()
+
+                elif kind == "model":
+                    model_state[0] = ("model ready", False) if first else (
+                        "%s did not answer — too big for this machine?"
+                        % config["model"], True)
+                    show_state()
 
                 elif kind == "status":
                     window.set_status(first, error=second)
@@ -382,6 +481,9 @@ def main():
     window.set_direction(config["chat_language"], config["my_language"])
     start_workers(int(config["workers"]))
     start_reader()
+
+    screengrab.set_dpi_aware()
+    threading.Thread(target=bridge_loop, daemon=True).start()
 
     window.root.after(80, pump)
     window.root.after(CARD_POLL_MS, review)
