@@ -32,7 +32,7 @@
   "_max_lines_help": "Messages shown in the feed. The whole log is parsed on startup; the newest this many that pass the channel and sender filters are displayed, and the oldest drop off as new chat arrives.",
   "max_lines": 200,
 
-  "_cards_help": "A new card first comes back after card_first_seconds; Right doubles the wait, Wrong halves it, clamped between the floor and the ceiling. The gap is the quiet stretch enforced between two popups.",
+  "_cards_help": "A new card first comes back after card_first_seconds; Again resets the wait to 1 minute, Hard halves it, Good doubles it, Easy quadruples it, clamped between the floor and the ceiling. The gap is the quiet stretch enforced between two popups.",
   "card_gap_seconds": 180,
   "card_first_seconds": 600,
   "card_min_seconds": 60,

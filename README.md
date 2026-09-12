@@ -203,7 +203,6 @@ Drag the feed by its top bar, resize it from the `◢` corner.
 | `write` | Open the composer |
 | `⚙` | Settings |
 | `clear` | Empty the feed |
-| `−` `+` | Font size |
 | `▁` | Shrink to a small badge; click the badge to bring it back |
 | `✕` | Quit |
 
@@ -224,16 +223,26 @@ Cards are looked up with a dictionary prompt rather than the chat one, which
 matters: asked as chat, a bare word tends to come back transliterated.
 
 A card pops up on its own when it falls due, one at a time. `Flip` (or Space)
-reveals both translations and swaps in `Wrong` / `Right` (or ←/→).
+reveals both translations and four grades, keys `1`–`4`:
 
-- **Right** doubles the wait: 10 min → 20 → 40 → 80 …
-- **Wrong** halves it, down to the floor.
+- **Again** — back to 1 minute
+- **Hard** — half the wait
+- **Good** — double the wait: 10 min → 20 → 40 …
+- **Easy** — four times the wait
+
+All clamped between the floor and ceiling in settings. Closing the card or
+pressing Esc counts as Again.
 
 The window never takes focus — it would drop you out of the game — so click it
 before using the keys.
 
 `cards` opens the deck: fix a translation the model got wrong, reset a card's
 timer, or delete it. The deck lives in `overlay/cards.json`.
+
+**New** there writes a card by hand, for a word that never came past in chat.
+Fill in what you know and press Save; any translation left blank is filled in
+by the model in the background, so a word on its own is enough. The sentence is
+optional. A word already in the deck is refused rather than duplicated.
 
 Cards are scheduled in wall-clock time, so closing the overlay does not reset
 anything. If a pile of them came due while it was closed, they are spaced out

@@ -86,8 +86,6 @@ class Overlay:
 
         _header_button(header, "✕", self._close)
         _header_button(header, "▁", self.minimize)
-        _header_button(header, "+", self._bigger)
-        _header_button(header, "−", self._smaller)
         _header_button(header, "clear", self.clear)
         _header_button(header, "⚙", lambda: self.on_settings and self.on_settings())
         _header_button(header, "write", lambda: self.on_compose and self.on_compose())
@@ -239,12 +237,6 @@ class Overlay:
 
     def refresh_done(self):
         self.refresh_button.config(text="refresh")
-
-    def _bigger(self):
-        self.set_font_size(min(20, self.font_size + 1))
-
-    def _smaller(self):
-        self.set_font_size(max(7, self.font_size - 1))
 
     def set_font_size(self, size):
         self.font_size = size
@@ -556,9 +548,11 @@ class Composer:
 class CardPopup:
     """One flashcard at a time: word and sentence, then their translations."""
 
-    def __init__(self, parent, on_answer):
+    def __init__(self, parent, on_answer, font_size=10):
         self.parent = parent
         self.on_answer = on_answer
+        # The feed's font size; the card's text is sized relative to it.
+        self.font_size = font_size
         self.window = None
         self.card = None
 
@@ -579,28 +573,30 @@ class CardPopup:
         window.configure(bg=BG)
         window.attributes("-topmost", True)
         window.resizable(False, False)
-        window.protocol("WM_DELETE_WINDOW", lambda: self._answer(False))
+        window.protocol("WM_DELETE_WINDOW", lambda *_: self._answer("again"))
         self.window = window
 
         body = tk.Frame(window, bg=BG, padx=18, pady=14)
         body.pack(fill="both", expand=True)
 
         tk.Label(body, text=self.card.word, bg=BG, fg=FG_TRANSLATION,
-                 font=("Segoe UI", 18, "bold"), wraplength=380,
+                 font=("Segoe UI", self.font_size + 8, "bold"), wraplength=380,
                  justify="left", anchor="w").pack(fill="x")
 
         tk.Label(body, text=self.card.sentence, bg=BG, fg=FG_ORIGINAL,
-                 font=("Segoe UI", 10, "italic"), wraplength=380,
+                 font=("Segoe UI", self.font_size, "italic"), wraplength=380,
                  justify="left", anchor="w").pack(fill="x", pady=(8, 0))
 
         self.back = tk.Frame(body, bg=BG)
 
         tk.Frame(self.back, bg="#2a3040", height=1).pack(fill="x", pady=(14, 10))
         tk.Label(self.back, text=self.card.word_translation or "(no translation)",
-                 bg=BG, fg=FG_OK, font=("Segoe UI", 15, "bold"), wraplength=380,
+                 bg=BG, fg=FG_OK, font=("Segoe UI", self.font_size + 5, "bold"),
+                 wraplength=380,
                  justify="left", anchor="w").pack(fill="x")
         tk.Label(self.back, text=self.card.sentence_translation or "",
-                 bg=BG, fg=FG_TRANSLATION, font=("Segoe UI", 10), wraplength=380,
+                 bg=BG, fg=FG_TRANSLATION, font=("Segoe UI", self.font_size),
+                 wraplength=380,
                  justify="left", anchor="w").pack(fill="x", pady=(6, 0))
 
         self.buttons = tk.Frame(body, bg=BG)
@@ -611,19 +607,18 @@ class CardPopup:
         self.flip_button.pack(fill="x")
 
         window.bind("<space>", lambda _e: self.flip())
-        window.bind("<Escape>", lambda _e: self._answer(False))
+        window.bind("<Escape>", lambda _e: self._answer("again"))
         self._place(window)
         # Deliberately no focus_force here: this pops up over a running game,
         # and pulling focus would drop the player out of it. Clicking the card
         # gives it focus, after which the key bindings work.
         window.lift()
 
-    @staticmethod
-    def _button(parent, text, command, colour):
+    def _button(self, parent, text, command, colour):
         return tk.Button(parent, text=text, command=command, bg=BG_HEADER,
                          fg=colour, activebackground="#2a3040",
                          activeforeground=colour, bd=0, padx=14, pady=6,
-                         font=("Segoe UI", 10, "bold"), cursor="hand2")
+                         font=("Segoe UI", self.font_size, "bold"), cursor="hand2")
 
     def _place(self, window):
         """Centres the card so it cannot open off-screen."""
@@ -639,27 +634,28 @@ class CardPopup:
         self.back.pack(fill="x", before=self.buttons)
         self.flip_button.pack_forget()
 
-        wrong = self._button(self.buttons, "Wrong", lambda: self._answer(False), FG_ERROR)
-        wrong.pack(side="left", expand=True, fill="x", padx=(0, 4))
-        right = self._button(self.buttons, "Right", lambda: self._answer(True), FG_OK)
-        right.pack(side="left", expand=True, fill="x", padx=(4, 0))
-
-        self.window.bind("<Left>", lambda _e: self._answer(False))
-        self.window.bind("<Right>", lambda _e: self._answer(True))
+        for key, (grade, label, colour) in enumerate(self.GRADES, start=1):
+            button = self._button(self.buttons, label,
+                                  lambda g=grade: self._answer(g), colour)
+            button.pack(side="left", expand=True, fill="x", padx=2)
+            self.window.bind(str(key), lambda _e, g=grade: self._answer(g))
         self._place(self.window)
 
-    def _answer(self, correct):
+    GRADES = [("again", "Again", FG_ERROR), ("hard", "Hard", "#e8b86a"),
+              ("good", "Good", FG_OK), ("easy", "Easy", FG_SENDER)]
+
+    def _answer(self, grade):
         card = self.card
         self.card = None
         if self.window is not None and self.window.winfo_exists():
             self.window.destroy()
         self.window = None
         if card is not None and self.on_answer:
-            self.on_answer(card, correct)
+            self.on_answer(card, grade)
 
 
 class CardEditor:
-    """Browse the deck: fix a bad translation, reset a timer, drop a card."""
+    """Browse the deck: add a card by hand, fix a translation, drop one."""
 
     FIELDS = [
         ("word", "Word"),
@@ -668,11 +664,16 @@ class CardEditor:
         ("sentence_translation", "Meaning"),
     ]
 
-    def __init__(self, parent, deck):
+    def __init__(self, parent, deck, direction=None, on_translate=None):
         self.parent = parent
         self.deck = deck
+        # direction() -> (source, target) for a card typed in by hand;
+        # on_translate(card) fills whatever was left blank, off the UI thread.
+        self.direction = direction
+        self.on_translate = on_translate
         self.window = None
         self.rows = {}          # tree row id -> Card
+        self.drafting = False   # typing a new card rather than editing one
 
     def show(self):
         if self.window is not None and self.window.winfo_exists():
@@ -709,7 +710,7 @@ class CardEditor:
             self.tree.heading(name, text=title)
             self.tree.column(name, width=width, anchor="w")
         self.tree.pack(fill="both", expand=True, padx=10, pady=(10, 6))
-        self.tree.bind("<<TreeviewSelect>>", lambda _e: self._load_selected())
+        self.tree.bind("<<TreeviewSelect>>", self._picked)
 
         form = tk.Frame(window, bg=BG, padx=10)
         form.pack(fill="x")
@@ -735,7 +736,8 @@ class CardEditor:
         for text, command, colour in (("Close", window.destroy, FG_STATUS),
                                       ("Delete", self._delete, FG_ERROR),
                                       ("Reset timer", self._reset, FG_STATUS),
-                                      ("Save", self._save, FG_OK)):
+                                      ("Save", self._save, FG_OK),
+                                      ("New", self._new, FG_SENDER)):
             tk.Button(buttons, text=text, command=command, bg=BG_HEADER, fg=colour,
                       activebackground="#2a3040", activeforeground=colour, bd=0,
                       padx=12, pady=4, font=("Segoe UI", 9), cursor="hand2"
@@ -775,18 +777,66 @@ class CardEditor:
     def _current(self):
         return self.rows.get(self._selection())
 
+    def _picked(self, _event):
+        """Clicking a row abandons whatever was being typed."""
+        if self.tree.selection():
+            self.drafting = False
+        self._load_selected()
+
     def _load_selected(self):
+        if self.drafting:
+            return              # a half-typed card must survive a reload
         card = self._current()
         for key, _title in self.FIELDS:
             self.vars[key].set(getattr(card, key) if card else "")
 
+    def _new(self):
+        self.drafting = True
+        self.tree.selection_remove(*self.tree.selection())
+        for key, _title in self.FIELDS:
+            self.vars[key].set("")
+        self.status.config(text="new card — type a word and Save. Leave the "
+                                "translations blank to have them filled in.",
+                           fg=FG_SENDER)
+
+    def _create(self):
+        word = self.vars["word"].get().strip()
+        source, target = self.direction() if self.direction else ("", "")
+        if self.deck.has_word(word, source):
+            return self._warn("'%s' is already in the deck" % word)
+
+        card = self.deck.new_card(
+            word=word,
+            sentence=self.vars["sentence"].get().strip(),
+            word_translation=self.vars["word_translation"].get().strip(),
+            sentence_translation=self.vars["sentence_translation"].get().strip(),
+            source=source, target=target)
+        self.deck.add(card)
+        self.drafting = False
+        self.reload()
+        for row, known in self.rows.items():
+            if known is card:
+                self.tree.selection_set(row)
+
+        blank = not card.word_translation or (card.sentence
+                                              and not card.sentence_translation)
+        if blank and self.on_translate:
+            self.on_translate(card)
+            self.status.config(text="added '%s' — translating…" % card.word,
+                               fg=FG_SENDER)
+        else:
+            self.status.config(text="added '%s'" % card.word, fg=FG_OK)
+
     def _save(self):
-        card = self._current()
-        if not card:
-            return self._warn("pick a card first")
         word = self.vars["word"].get().strip()
         if not word:
             return self._warn("the word cannot be empty")
+        if self.drafting:
+            return self._create()
+
+        card = self._current()
+        if not card:
+            return self._warn("pick a card first, or press New")
         card.word = word
         for key, _title in self.FIELDS[1:]:
             setattr(card, key, self.vars[key].get().strip())
@@ -826,6 +876,7 @@ class Settings:
     ]
 
     FIELDS_NUMBER = [
+        ("font_size", "Font size (feed and cards)"),
         ("workers", "Parallel translations"),
         ("timeout_seconds", "Timeout (seconds)"),
         ("max_lines", "Max lines kept"),

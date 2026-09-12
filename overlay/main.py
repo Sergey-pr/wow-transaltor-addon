@@ -109,7 +109,7 @@ def save_config(config):
 
 # What the window owns and nothing else does. Everything else in the file
 # belongs to the settings dialog, which writes it the moment it changes.
-LAYOUT_KEYS = ("geometry", "font_size", "compose_geometry", "chat_log_path")
+LAYOUT_KEYS = ("geometry", "compose_geometry", "chat_log_path")
 
 
 def save_layout(config):
@@ -154,7 +154,6 @@ def main():
     def on_close():
         # Read geometry while the widgets still exist, so the layout survives.
         config["geometry"] = window.geometry()
-        config["font_size"] = window.font_size
         config["compose_geometry"] = composer.geometry()
         stop_event.set()
         if reader[0]:
@@ -358,6 +357,8 @@ def main():
         translator.configure(host=config["ollama_host"], model=config["model"],
                              timeout=config["timeout_seconds"])
         window.set_opacity(config["opacity"])
+        window.set_font_size(int(config["font_size"]))
+        popup.font_size = int(config["font_size"])  # takes effect on the next card
         window.max_lines = config["max_lines"]
         window.set_direction(config["chat_language"], config["my_language"])
         composer.set_direction(config["my_language"], config["chat_language"])
@@ -382,15 +383,32 @@ def main():
     # Counts from launch, so starting the overlay does not fire a card instantly.
     quiet_until = [time.monotonic() + int(config["card_gap_seconds"])]
 
-    def on_answer(card, correct):
-        deck.answer(card, correct)
+    def on_answer(card, grade):
+        deck.answer(card, grade)
         quiet_until[0] = time.monotonic() + int(config["card_gap_seconds"])
-        window.set_status("%s — '%s' returns in %d min"
-                          % ("right" if correct else "wrong",
-                             card.word, card.interval // 60))
+        window.set_status("%s — '%s' returns in %s"
+                          % (grade, card.word, ui.CardEditor._due_text(card)))
 
-    popup = ui.CardPopup(window.root, on_answer)
-    editor = ui.CardEditor(window.root, deck)
+    popup = ui.CardPopup(window.root, on_answer, font_size=int(config["font_size"]))
+    def fill_card(card):
+        """Fills in whatever a hand-typed card was left missing."""
+        def run():
+            source, target = card.source, card.target
+            if not card.word_translation:
+                card.word_translation = translator.translate_word(
+                    card.word, card.sentence or card.word, source, target) or ""
+            if card.sentence and not card.sentence_translation:
+                card.sentence_translation = translator.translate(
+                    card.sentence, source, target) or ""
+            deck.save()
+            window.root.after(0, editor.reload)
+
+        if card.source and card.target and card.source != card.target:
+            threading.Thread(target=run, daemon=True).start()
+
+    editor = ui.CardEditor(
+        window.root, deck, on_translate=fill_card,
+        direction=lambda: (config["chat_language"], config["my_language"]))
 
     def review():
         # One card at a time, and never before the quiet stretch since the

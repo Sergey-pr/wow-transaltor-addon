@@ -1,8 +1,8 @@
 """Spaced-repetition deck: word cards cut out of the chat feed.
 
-Answering right doubles the wait before a card comes back, answering wrong
-halves it. The bounds keep a long streak from parking a card past the point of
-usefulness, and a run of wrong answers from turning into a spam loop.
+Four grades, Anki style: Again resets the wait to a minute, Hard halves it,
+Good doubles it, Easy quadruples it. The bounds keep a long streak from parking
+a card past the point of usefulness, and a run of misses from a spam loop.
 """
 
 import json
@@ -13,10 +13,15 @@ import time
 FIRST_INTERVAL = 10 * 60
 MIN_INTERVAL = 60
 MAX_INTERVAL = 30 * 24 * 60 * 60
+AGAIN_INTERVAL = 60
+
+# grade -> multiplier on the current interval; None means start over.
+GRADES = {"again": None, "hard": 0.5, "good": 2, "easy": 4}
 
 
-def next_interval(interval, correct, minimum=MIN_INTERVAL, maximum=MAX_INTERVAL):
-    step = interval * 2 if correct else interval / 2
+def next_interval(interval, grade, minimum=MIN_INTERVAL, maximum=MAX_INTERVAL):
+    factor = GRADES[grade]
+    step = AGAIN_INTERVAL if factor is None else interval * factor
     # A minimum above the maximum would make the clamp order decide the answer,
     # so the floor wins and the result stays predictable.
     return int(max(minimum, min(max(maximum, minimum), step)))
@@ -43,12 +48,13 @@ class Card:
     def as_dict(self):
         return {name: getattr(self, name) for name in self.__slots__}
 
-    def answer(self, correct, minimum=MIN_INTERVAL, maximum=MAX_INTERVAL):
-        if correct:
-            self.right += 1
-        else:
+    def answer(self, grade, minimum=MIN_INTERVAL, maximum=MAX_INTERVAL):
+        # Only Again counts as a miss; Hard is still a recall, just a slow one.
+        if grade == "again":
             self.wrong += 1
-        self.interval = next_interval(self.interval, correct, minimum, maximum)
+        else:
+            self.right += 1
+        self.interval = next_interval(self.interval, grade, minimum, maximum)
         self.due = time.time() + self.interval
 
 
@@ -115,8 +121,8 @@ class Deck:
             ready = [c for c in self._cards if c.due <= now]
             return min(ready, key=lambda c: c.due) if ready else None
 
-    def answer(self, card, correct):
-        card.answer(correct, self.minimum, self.maximum)
+    def answer(self, card, grade):
+        card.answer(grade, self.minimum, self.maximum)
         self.save()
 
     def forget(self, card):
