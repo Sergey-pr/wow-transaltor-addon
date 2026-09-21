@@ -50,6 +50,21 @@ Rules:
 - If it is a verb, give the {target} infinitive.
 - Context, for picking the right sense only -- do not translate it: "{sentence}\""""
 
+# A card typed in by hand is usually a bare word, and a word with no example
+# is a word with no context to hang on. The model writes the example in the
+# language being learned; the translation comes from the ordinary chat prompt.
+_SENTENCE_PROMPT = """You write example sentences in {source}.
+
+The user sends one {source} word. Reply with one short {source} sentence that
+uses it, nothing else.
+
+Rules:
+- Write in {source} only. Never translate it, never explain, never add notes.
+- One sentence, 4 to 10 words, the kind a World of Warcraft player would type
+  in chat.
+- The sentence must contain the word itself.
+- No quotes, no bullet, no label, no second line."""
+
 # How long Ollama should hold the weights in memory between translations.
 KEEP_ALIVE = "30m"
 
@@ -260,6 +275,31 @@ class Translator:
 
         # A dictionary entry, not a sentence: models like to end it anyway.
         result = result.rstrip(".").strip()
+        if not result:
+            return None
+
+        self._store(key, result)
+        return result
+
+    def make_sentence(self, word, source_code):
+        """Invents an example sentence in the source language for a bare word."""
+        if source_code == "auto":
+            return None            # nothing to write the sentence in
+
+        key = ("example", source_code, word.strip().lower())
+        hit = self._cached(key)
+        if hit is not None:
+            return hit
+
+        system = _SENTENCE_PROMPT.format(source=languages.name_for(source_code))
+        # Warmer than a lookup: a sentence should read like one, not like the
+        # same template every time.
+        result = self._ask(system, word, temperature=0.6, predict=60)
+        if result is None:
+            return None
+
+        # Small models like to add the translation on a line of its own.
+        result = result.splitlines()[0].strip()
         if not result:
             return None
 

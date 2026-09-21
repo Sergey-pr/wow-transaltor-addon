@@ -391,12 +391,21 @@ def main():
 
     popup = ui.CardPopup(window.root, on_answer, font_size=int(config["font_size"]))
     def fill_card(card):
-        """Fills in whatever a hand-typed card was left missing."""
+        """Fills in whatever a hand-typed card was left missing.
+
+        A card typed in by hand is usually just a word, so the example sentence
+        is written here too -- first in the language being learned, then
+        translated like any other line.
+        """
         def run():
             source, target = card.source, card.target
             if not card.word_translation:
                 card.word_translation = translator.translate_word(
                     card.word, card.sentence or card.word, source, target) or ""
+            if not card.sentence:
+                card.sentence = translator.make_sentence(card.word, source) or ""
+                # A freshly written sentence has no translation to keep.
+                card.sentence_translation = ""
             if card.sentence and not card.sentence_translation:
                 card.sentence_translation = translator.translate(
                     card.sentence, source, target) or ""

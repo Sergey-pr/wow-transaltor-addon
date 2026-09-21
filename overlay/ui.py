@@ -795,8 +795,9 @@ class CardEditor:
         self.tree.selection_remove(*self.tree.selection())
         for key, _title in self.FIELDS:
             self.vars[key].set("")
-        self.status.config(text="new card — type a word and Save. Leave the "
-                                "translations blank to have them filled in.",
+        self.status.config(text="new card — type a word and Save. Leave the rest "
+                                "blank: the meaning, an example sentence and its "
+                                "translation get written for you.",
                            fg=FG_SENDER)
 
     def _create(self):
@@ -818,11 +819,13 @@ class CardEditor:
             if known is card:
                 self.tree.selection_set(row)
 
-        blank = not card.word_translation or (card.sentence
-                                              and not card.sentence_translation)
+        # A missing sentence is now something to fill rather than something to
+        # leave alone, so a bare word still has work to do.
+        blank = (not card.word_translation or not card.sentence
+                 or not card.sentence_translation)
         if blank and self.on_translate:
             self.on_translate(card)
-            self.status.config(text="added '%s' — translating…" % card.word,
+            self.status.config(text="added '%s' — writing the rest…" % card.word,
                                fg=FG_SENDER)
         else:
             self.status.config(text="added '%s'" % card.word, fg=FG_OK)
