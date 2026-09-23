@@ -176,24 +176,29 @@ def main():
         if target == "auto" or source == target:
             events.put(("status", "set a chat and my language first", True))
             return
-        if deck.has_word(word, source):
+        # Claimed up front, not merely checked: the card only lands once the
+        # model has answered, and a second click lands well inside that wait.
+        if not deck.claim(word, source):
             events.put(("status", "'%s' is already in the deck" % word, False))
             return
 
         events.put(("status", "making a card for '%s'…" % word, False))
 
         def build():
-            card = deck.new_card(
-                word=word,
-                sentence=sentence,
-                word_translation=translator.translate_word(word, sentence, source, target) or "",
-                sentence_translation=translator.translate(sentence, source, target) or "",
-                source=source,
-                target=target,
-            )
-            deck.add(card)
-            events.put(("status", "card %d: '%s' — due in %d min"
-                        % (len(deck), word, card.interval // 60), False))
+            try:
+                card = deck.new_card(
+                    word=word,
+                    sentence=sentence,
+                    word_translation=translator.translate_word(word, sentence, source, target) or "",
+                    sentence_translation=translator.translate(sentence, source, target) or "",
+                    source=source,
+                    target=target,
+                )
+                deck.add(card)
+                events.put(("status", "card %d: '%s' — due in %d min"
+                            % (len(deck), word, card.interval // 60), False))
+            finally:
+                deck.release(word, source)
 
         threading.Thread(target=build, daemon=True).start()
 

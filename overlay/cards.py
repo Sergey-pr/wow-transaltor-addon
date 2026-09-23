@@ -66,6 +66,7 @@ class Deck:
         self.path = path
         self.set_bounds(first, minimum, maximum)
         self._cards = []
+        self._claimed = set()   # words whose card is still being built
         self._lock = threading.Lock()
         self.load()
 
@@ -109,10 +110,34 @@ class Deck:
         self.save()
 
     def has_word(self, word, source):
-        needle = word.strip().lower()
         with self._lock:
-            return any(c.word.strip().lower() == needle and c.source == source
-                       for c in self._cards)
+            return self._holds(word, source)
+
+    def _holds(self, word, source):
+        """has_word without the lock, for callers that already hold it."""
+        needle = word.strip().lower()
+        return any(c.word.strip().lower() == needle and c.source == source
+                   for c in self._cards)
+
+    def claim(self, word, source):
+        """Reserves a word while its card is being built.
+
+        A card cut out of the chat takes a few seconds of model time before it
+        lands, and until then nothing in the deck says it is on its way -- so a
+        second click on the same word used to start a second card. Returns False
+        when the word is already in the deck or already being worked on; the
+        caller releases it once the card lands or the attempt fails.
+        """
+        key = (word.strip().lower(), source)
+        with self._lock:
+            if key in self._claimed or self._holds(word, source):
+                return False
+            self._claimed.add(key)
+            return True
+
+    def release(self, word, source):
+        with self._lock:
+            self._claimed.discard((word.strip().lower(), source))
 
     def due_card(self, now=None):
         """The most overdue card, or None when nothing is waiting."""

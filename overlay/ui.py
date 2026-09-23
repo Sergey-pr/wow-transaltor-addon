@@ -664,6 +664,16 @@ class CardEditor:
         ("sentence_translation", "Meaning"),
     ]
 
+    # name, heading, width, sort key. Due and score sort on the numbers behind
+    # the text: "2.0 d" and "10 / 1" do not order themselves as strings.
+    COLUMNS = [
+        ("word", "Word", 150, lambda c: c.word.strip().lower()),
+        ("means", "Means", 190, lambda c: c.word_translation.strip().lower()),
+        ("due", "Due in", 90, lambda c: c.due),
+        ("score", "Right/Wrong", 90, lambda c: (c.right, c.wrong)),
+    ]
+    SORT_KEYS = {name: key for name, _title, _width, key in COLUMNS}
+
     def __init__(self, parent, deck, direction=None, on_translate=None):
         self.parent = parent
         self.deck = deck
@@ -674,6 +684,9 @@ class CardEditor:
         self.window = None
         self.rows = {}          # tree row id -> Card
         self.drafting = False   # typing a new card rather than editing one
+        # Kept on the editor, not the window, so the order survives a close.
+        self.sort_column = "due"
+        self.sort_down = False
 
     def show(self):
         if self.window is not None and self.window.winfo_exists():
@@ -702,15 +715,30 @@ class CardEditor:
                         foreground=FG_STATUS, borderwidth=0)
         style.map("Cards.Treeview", background=[("selected", "#2a3040")])
 
-        columns = ("word", "means", "due", "score")
-        self.tree = ttk.Treeview(window, columns=columns, show="headings",
-                                 style="Cards.Treeview", selectmode="browse")
-        for name, title, width in (("word", "Word", 150), ("means", "Means", 190),
-                                   ("due", "Due in", 90), ("score", "Right/Wrong", 90)):
-            self.tree.heading(name, text=title)
+        search = tk.Frame(window, bg=BG, padx=10)
+        search.pack(fill="x", pady=(10, 0))
+        tk.Label(search, text="Search", bg=BG, fg=FG_STATUS, font=("Segoe UI", 9)
+                 ).pack(side="left", padx=(0, 8))
+        self.query = tk.StringVar()
+        box = tk.Entry(search, textvariable=self.query, bg=BG_INPUT,
+                       fg=FG_TRANSLATION, insertbackground=FG_TRANSLATION, bd=0,
+                       highlightthickness=1, highlightbackground="#2a3040",
+                       highlightcolor=FG_SENDER)
+        box.pack(side="left", fill="x", expand=True, ipady=3)
+        box.bind("<Escape>", self._clear_search)
+        # Filter as it is typed: at deck size the whole list rebuilds instantly.
+        self.query.trace_add("write", lambda *_a: self.reload())
+
+        self.tree = ttk.Treeview(window, columns=[c[0] for c in self.COLUMNS],
+                                 show="headings", style="Cards.Treeview",
+                                 selectmode="browse")
+        for name, title, width, _key in self.COLUMNS:
+            self.tree.heading(name, text=title,
+                              command=lambda c=name: self._sort_by(c))
             self.tree.column(name, width=width, anchor="w")
-        self.tree.pack(fill="both", expand=True, padx=10, pady=(10, 6))
+        self.tree.pack(fill="both", expand=True, padx=10, pady=(6, 6))
         self.tree.bind("<<TreeviewSelect>>", self._picked)
+        box.focus_set()
 
         form = tk.Frame(window, bg=BG, padx=10)
         form.pack(fill="x")
@@ -756,18 +784,54 @@ class CardEditor:
             return "%.1f h" % (left / 3600)
         return "%.1f d" % (left / 86400)
 
+    def _sort_by(self, column):
+        """Clicking a heading sorts by it; clicking it again turns it around."""
+        if column == self.sort_column:
+            self.sort_down = not self.sort_down
+        else:
+            self.sort_column, self.sort_down = column, False
+        self.reload()
+
+    def _mark_headings(self):
+        for name, title, _width, _key in self.COLUMNS:
+            arrow = ""
+            if name == self.sort_column:
+                arrow = " ▾" if self.sort_down else " ▴"
+            self.tree.heading(name, text=title + arrow)
+
+    def _clear_search(self, _event=None):
+        self.query.set("")
+        return "break"
+
+    def _matches(self, card, needle):
+        """Search covers the sentence too, not just the two list columns."""
+        return any(needle in (getattr(card, key) or "").lower()
+                   for key, _title in self.FIELDS)
+
     def reload(self):
         selected = self.rows.get(self._selection())
+        needle = self.query.get().strip().lower()
+        shown = [c for c in self.deck.all_cards()
+                 if not needle or self._matches(c, needle)]
+        shown.sort(key=self.SORT_KEYS[self.sort_column], reverse=self.sort_down)
+
+        self._mark_headings()
         self.tree.delete(*self.tree.get_children())
         self.rows.clear()
-        for card in self.deck.all_cards():
+        for card in shown:
             row = self.tree.insert("", "end", values=(
                 card.word, card.word_translation, self._due_text(card),
                 "%d / %d" % (card.right, card.wrong)))
             self.rows[row] = card
             if card is selected:
                 self.tree.selection_set(row)
-        self.status.config(text="%d card(s)" % len(self.rows), fg=FG_STATUS)
+
+        total = len(self.deck)
+        if needle:
+            self.status.config(text="%d of %d card(s)" % (len(shown), total),
+                               fg=FG_STATUS if shown else FG_ERROR)
+        else:
+            self.status.config(text="%d card(s)" % total, fg=FG_STATUS)
         self._load_selected()
 
     def _selection(self):
@@ -803,7 +867,8 @@ class CardEditor:
     def _create(self):
         word = self.vars["word"].get().strip()
         source, target = self.direction() if self.direction else ("", "")
-        if self.deck.has_word(word, source):
+        # Claim rather than ask: the same word may be mid-build from a chat line.
+        if not self.deck.claim(word, source):
             return self._warn("'%s' is already in the deck" % word)
 
         card = self.deck.new_card(
@@ -813,7 +878,10 @@ class CardEditor:
             sentence_translation=self.vars["sentence_translation"].get().strip(),
             source=source, target=target)
         self.deck.add(card)
+        self.deck.release(word, source)
         self.drafting = False
+        # A filter left over from looking the word up would hide the new card.
+        self.query.set("")
         self.reload()
         for row, known in self.rows.items():
             if known is card:
