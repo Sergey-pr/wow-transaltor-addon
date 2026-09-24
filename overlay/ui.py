@@ -545,12 +545,31 @@ class Composer:
         self.status.config(text="copied — paste in chat with Ctrl+V", fg=FG_OK)
 
 
+def span_text(seconds):
+    """A wait the way Anki prints it on its buttons: 10m, 1.5h, 4d, 2.1mo."""
+    if seconds < 60:
+        return "<1m"
+    if seconds < 3600:
+        return "%dm" % round(seconds / 60)
+    if seconds < 86400:
+        return "%.1fh" % (seconds / 3600)
+    if seconds < 10 * 86400:
+        return ("%.1f" % (seconds / 86400)).replace(".0", "") + "d"
+    if seconds < 30 * 86400:
+        return "%dd" % round(seconds / 86400)
+    return "%.1fmo" % (seconds / (30 * 86400))
+
+
 class CardPopup:
     """One flashcard at a time: word and sentence, then their translations."""
 
-    def __init__(self, parent, on_answer, font_size=10):
+    def __init__(self, parent, on_answer, font_size=10, preview=None, on_skip=None):
         self.parent = parent
         self.on_answer = on_answer
+        # on_skip(card): the card was closed without an answer.
+        self.on_skip = on_skip
+        # preview(card) -> {grade: seconds}, printed under each answer button.
+        self.preview = preview
         # The feed's font size; the card's text is sized relative to it.
         self.font_size = font_size
         self.window = None
@@ -573,7 +592,8 @@ class CardPopup:
         window.configure(bg=BG)
         window.attributes("-topmost", True)
         window.resizable(False, False)
-        window.protocol("WM_DELETE_WINDOW", lambda *_: self._answer("again"))
+        # Closing is not an answer: the card just goes to the back of the queue.
+        window.protocol("WM_DELETE_WINDOW", self.skip)
         self.window = window
 
         body = tk.Frame(window, bg=BG, padx=18, pady=14)
@@ -607,7 +627,7 @@ class CardPopup:
         self.flip_button.pack(fill="x")
 
         window.bind("<space>", lambda _e: self.flip())
-        window.bind("<Escape>", lambda _e: self._answer("again"))
+        window.bind("<Escape>", lambda _e: self.skip())
         self._place(window)
         # Deliberately no focus_force here: this pops up over a running game,
         # and pulling focus would drop the player out of it. Clicking the card
@@ -634,7 +654,10 @@ class CardPopup:
         self.back.pack(fill="x", before=self.buttons)
         self.flip_button.pack_forget()
 
+        waits = self.preview(self.card) if self.preview else {}
         for key, (grade, label, colour) in enumerate(self.GRADES, start=1):
+            if grade in waits:
+                label = "%s\n%s" % (label, span_text(waits[grade]))
             button = self._button(self.buttons, label,
                                   lambda g=grade: self._answer(g), colour)
             button.pack(side="left", expand=True, fill="x", padx=2)
@@ -644,14 +667,24 @@ class CardPopup:
     GRADES = [("again", "Again", FG_ERROR), ("hard", "Hard", "#e8b86a"),
               ("good", "Good", FG_OK), ("easy", "Easy", FG_SENDER)]
 
-    def _answer(self, grade):
+    def _dismiss(self):
+        """Closes the window and hands back the card it was showing."""
         card = self.card
         self.card = None
         if self.window is not None and self.window.winfo_exists():
             self.window.destroy()
         self.window = None
+        return card
+
+    def _answer(self, grade):
+        card = self._dismiss()
         if card is not None and self.on_answer:
             self.on_answer(card, grade)
+
+    def skip(self):
+        card = self._dismiss()
+        if card is not None and self.on_skip:
+            self.on_skip(card)
 
 
 class CardEditor:
@@ -736,12 +769,26 @@ class CardEditor:
             self.tree.heading(name, text=title,
                               command=lambda c=name: self._sort_by(c))
             self.tree.column(name, width=width, anchor="w")
-        self.tree.pack(fill="both", expand=True, padx=10, pady=(6, 6))
         self.tree.bind("<<TreeviewSelect>>", self._picked)
         box.focus_set()
 
+        # The buttons, status and form are packed from the bottom up before the
+        # list takes what is left, so shrinking the window squeezes the list
+        # rather than pushing Save off the edge.
+        buttons = tk.Frame(window, bg=BG, padx=10, pady=10)
+        buttons.pack(side="bottom", fill="x")
+
+        # A line of its own that wraps: sharing a row with the buttons, a long
+        # hint used to shove them out of the window.
+        self.status = tk.Label(window, text="", bg=BG, fg=FG_STATUS,
+                               font=("Segoe UI", 8), anchor="w", justify="left",
+                               padx=10)
+        self.status.pack(side="bottom", fill="x", pady=(6, 0))
+        self.status.bind("<Configure>", lambda e: self.status.config(
+            wraplength=max(100, e.width - 20)))
+
         form = tk.Frame(window, bg=BG, padx=10)
-        form.pack(fill="x")
+        form.pack(side="bottom", fill="x")
         self.vars = {}
         for row, (key, title) in enumerate(self.FIELDS):
             tk.Label(form, text=title, bg=BG, fg=FG_STATUS, font=("Segoe UI", 9),
@@ -753,13 +800,7 @@ class CardEditor:
                      highlightcolor=FG_SENDER).grid(row=row, column=1, sticky="ew",
                                                     pady=2, ipady=3)
         form.columnconfigure(1, weight=1)
-
-        buttons = tk.Frame(window, bg=BG, padx=10, pady=10)
-        buttons.pack(fill="x")
-
-        self.status = tk.Label(buttons, text="", bg=BG, fg=FG_STATUS,
-                               font=("Segoe UI", 8), anchor="w")
-        self.status.pack(side="left")
+        self.tree.pack(fill="both", expand=True, padx=10, pady=(6, 0))
 
         for text, command, colour in (("Close", window.destroy, FG_STATUS),
                                       ("Delete", self._delete, FG_ERROR),

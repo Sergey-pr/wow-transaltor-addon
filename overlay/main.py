@@ -186,11 +186,15 @@ def main():
 
         def build():
             try:
+                # The sentence first, so the word can be matched to the sense
+                # its translation went with.
+                rendered = translator.translate(sentence, source, target) or ""
                 card = deck.new_card(
                     word=word,
                     sentence=sentence,
-                    word_translation=translator.translate_word(word, sentence, source, target) or "",
-                    sentence_translation=translator.translate(sentence, source, target) or "",
+                    word_translation=translator.translate_word(
+                        word, sentence, source, target, rendered=rendered) or "",
+                    sentence_translation=rendered,
                     source=source,
                     target=target,
                 )
@@ -394,26 +398,38 @@ def main():
         window.set_status("%s — '%s' returns in %s"
                           % (grade, card.word, ui.CardEditor._due_text(card)))
 
-    popup = ui.CardPopup(window.root, on_answer, font_size=int(config["font_size"]))
+    def on_skip(card):
+        # Not an answer: the schedule and the score stay as they were.
+        deck.skip(card)
+        quiet_until[0] = time.monotonic() + int(config["card_gap_seconds"])
+        window.set_status("skipped '%s' — back of the queue" % card.word)
+
+    popup = ui.CardPopup(window.root, on_answer, font_size=int(config["font_size"]),
+                         preview=deck.preview, on_skip=on_skip)
     def fill_card(card):
         """Fills in whatever a hand-typed card was left missing.
 
         A card typed in by hand is usually just a word, so the example sentence
         is written here too -- first in the language being learned, then
-        translated like any other line.
+        translated like any other line. The word goes last: looked up on its
+        own it picks whichever sense comes to mind, which need not be the one
+        the sentence and its translation went with.
         """
         def run():
             source, target = card.source, card.target
-            if not card.word_translation:
-                card.word_translation = translator.translate_word(
-                    card.word, card.sentence or card.word, source, target) or ""
             if not card.sentence:
-                card.sentence = translator.make_sentence(card.word, source) or ""
+                # A meaning typed in by hand steers the example onto that sense.
+                card.sentence = translator.make_sentence(
+                    card.word, source, meaning=card.word_translation) or ""
                 # A freshly written sentence has no translation to keep.
                 card.sentence_translation = ""
             if card.sentence and not card.sentence_translation:
                 card.sentence_translation = translator.translate(
                     card.sentence, source, target) or ""
+            if not card.word_translation:
+                card.word_translation = translator.translate_word(
+                    card.word, card.sentence or card.word, source, target,
+                    rendered=card.sentence_translation) or ""
             deck.save()
             window.root.after(0, editor.reload)
 

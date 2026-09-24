@@ -50,6 +50,32 @@ Rules:
 - If it is a verb, give the {target} infinitive.
 - Context, for picking the right sense only -- do not translate it: "{sentence}\""""
 
+# Used instead of the dictionary prompt once the sentence has its own
+# translation: the card shows both, and a word glossed one way next to a
+# sentence that renders it another reads like two different words. Picking the
+# word out of the translation is an easier ask than a lookup a line above
+# says to match, which small models tend to skip.
+_WORD_ALIGN_PROMPT = """You align a {source} sentence with its {target} translation.
+
+{source}: "{sentence}"
+{target}: "{rendered}"
+
+The user sends one word from the {source} sentence. Reply with the {target}
+word or words that stand for it in the {target} sentence, nothing else.
+
+Rules:
+- In the {source} sentence the word may be conjugated or plural; find it
+  there first, then the {target} words that translate that word itself, not
+  the words next to it.
+- Take them from the {target} sentence above; do not pick another synonym.
+- Dictionary form: a verb as the {target} infinitive, a noun in the singular.
+- 1 to 3 words. No sentence, no punctuation, no explanation.
+- Never reply in {source}, never repeat the word back."""
+
+# Steers the example toward the sense already written on a hand-made card.
+_SENTENCE_MEANING = """
+- Use the word in the sense of "{meaning}"."""
+
 # A card typed in by hand is usually a bare word, and a word with no example
 # is a word with no context to hang on. The model writes the example in the
 # language being learned; the translation comes from the ordinary chat prompt.
@@ -254,21 +280,30 @@ class Translator:
         self._store(key, result)
         return result
 
-    def translate_word(self, word, sentence, source_code, target_code):
+    def translate_word(self, word, sentence, source_code, target_code, rendered=None):
         """Looks one word up, the way a dictionary would.
 
         The chat prompt is wrong for this: it is told to leave names and
         abbreviations alone, so a bare word often comes back transliterated
-        rather than translated. The sentence is passed only as context.
+        rather than translated. The sentence is passed only as context, and
+        `rendered`, its translation when there is one, pins the word to the
+        sense that translation went with.
         """
-        key = ("word", source_code, target_code, word.strip().lower())
+        # The context is part of the key: the same word in another sentence
+        # can mean something else, and must not come back from the cache.
+        key = ("word", source_code, target_code, word.strip().lower(),
+               sentence.strip().lower(), (rendered or "").strip().lower())
         hit = self._cached(key)
         if hit is not None:
             return hit
 
-        system = _WORD_PROMPT.format(source=languages.name_for(source_code),
-                                     target=languages.name_for(target_code),
-                                     sentence=sentence)
+        source = languages.name_for(source_code)
+        target = languages.name_for(target_code)
+        if rendered:
+            system = _WORD_ALIGN_PROMPT.format(source=source, target=target,
+                                               sentence=sentence, rendered=rendered)
+        else:
+            system = _WORD_PROMPT.format(source=source, target=target, sentence=sentence)
         result = self._ask(system, word, temperature=0.1, predict=40)
         if result is None:
             return None
@@ -281,17 +316,24 @@ class Translator:
         self._store(key, result)
         return result
 
-    def make_sentence(self, word, source_code):
-        """Invents an example sentence in the source language for a bare word."""
+    def make_sentence(self, word, source_code, meaning=None):
+        """Invents an example sentence in the source language for a bare word.
+
+        `meaning`, when the card already has one, keeps the example on that
+        sense of the word rather than whichever the model thinks of first.
+        """
         if source_code == "auto":
             return None            # nothing to write the sentence in
 
-        key = ("example", source_code, word.strip().lower())
+        key = ("example", source_code, word.strip().lower(),
+               (meaning or "").strip().lower())
         hit = self._cached(key)
         if hit is not None:
             return hit
 
         system = _SENTENCE_PROMPT.format(source=languages.name_for(source_code))
+        if meaning:
+            system += _SENTENCE_MEANING.format(meaning=meaning)
         # Warmer than a lookup: a sentence should read like one, not like the
         # same template every time.
         result = self._ask(system, word, temperature=0.6, predict=60)

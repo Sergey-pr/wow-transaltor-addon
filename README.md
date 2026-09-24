@@ -223,15 +223,23 @@ Cards are looked up with a dictionary prompt rather than the chat one, which
 matters: asked as chat, a bare word tends to come back transliterated.
 
 A card pops up on its own when it falls due, one at a time. `Flip` (or Space)
-reveals both translations and four grades, keys `1`–`4`:
+reveals both translations and four grades, keys `1`–`4`, each showing when
+the card would come back — scheduled the way Anki does it:
 
-- **Again** — back to 1 minute
-- **Hard** — half the wait
-- **Good** — double the wait: 10 min → 20 → 40 …
-- **Easy** — four times the wait
+- **New cards** go through learning steps of 1 and 10 minutes. Again goes
+  back to the first step, Hard repeats the step, Good moves to the next one;
+  passing the last step graduates the card to 1 day. Easy graduates it
+  straight to 4 days.
+- **Learned cards** carry an ease, 250% to start. Good multiplies the interval
+  by it (1 d → 2.5 d → 6 d …), Hard by 1.2 and lowers the ease by 15%, Easy by
+  ease × 1.3 and raises it by 15%. Answering a card late counts in its favour.
+- **Again on a learned card** is a lapse: the ease drops by 20%, the card
+  relearns for 10 minutes and then restarts at 1 day.
 
 All clamped between the floor and ceiling in settings. Closing the card or
-pressing Esc counts as Again.
+pressing Esc skips it: no answer is recorded and it goes to the back of the
+queue of cards already due. `Reset timer` in the deck starts a card over as
+new.
 
 The window never takes focus — it would drop you out of the game — so click it
 before using the keys.
