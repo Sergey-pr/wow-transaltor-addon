@@ -198,8 +198,8 @@ Drag the feed by its top bar, resize it from the `◢` corner.
 | Button | What it does |
 |---|---|
 | `refresh` | Pull new chat from the log (fallback path only) |
+| `new card` | Type a word and get a card for it |
 | `cards` | Open the deck editor |
-| `+card` | Make a card from the selected text |
 | `write` | Open the composer |
 | `⚙` | Settings |
 | `clear` | Empty the feed |
@@ -216,7 +216,8 @@ its own; `Copy` copies it again.
 ### Flashcards
 
 **Right-click any word in a chat line** to make a card from it. No selecting
-needed. For a phrase, select it and press `+card`.
+needed. For a phrase, select it and click the `add card` bubble that appears
+above the selection.
 
 The card stores the word, the sentence it came from, and a translation of each.
 Cards are looked up with a dictionary prompt rather than the chat one, which
@@ -252,6 +253,11 @@ Fill in what you know and press Save; any translation left blank is filled in
 by the model in the background, so a word on its own is enough. The sentence is
 optional. A word already in the deck is refused rather than duplicated.
 
+`new card` in the feed's header is the quick way to do the same: type a word,
+press Enter, and its meaning, an example sentence and the sentence's
+translation appear underneath once the model has written them. Enter again
+(or `Add another card`) clears the window for the next word.
+
 Cards are scheduled in wall-clock time, so closing the overlay does not reset
 anything. If a pile of them came due while it was closed, they are spaced out
 by `card_gap_seconds` rather than fired back to back.
@@ -278,7 +284,10 @@ applies them immediately, without a restart.
 | `chat_language` | Chat language as a code like `nl`, or `auto` |
 | `my_language` | Your language |
 | `chat_log_path` | Path to `WoWChatLog.txt`. Blank means auto-detect |
+| `backend` | `ollama` for the local model, `claude` for Claude through the Claude Code CLI |
 | `model` | Ollama model |
+| `claude_model` | `haiku`, `sonnet` or `opus` when the backend is `claude` |
+| `claude_path` | Path to `claude.exe`. Blank means PATH, then the copy the Claude desktop app ships (Store builds keep it under `%LOCALAPPDATA%\Packages\Claude_*`) |
 | `timeout_seconds` | Give a large model room to load — 120 by default |
 | `workers` | How many translations run in parallel |
 | `channels` | Channel whitelist, e.g. `["Guild", "Say", "Whisper"]`. Empty means all |
@@ -289,6 +298,11 @@ applies them immediately, without a restart.
 | `card_first_seconds` | How long a new card waits before its first showing |
 | `card_min_seconds` | Floor on the interval, so wrong answers cannot spam |
 | `card_max_days` | Ceiling on the interval |
+
+The `claude` backend runs `claude -p` once per request, signed in with your
+claude.ai subscription, so no API key and no separate billing — but it counts
+against the subscription's usage limits and takes a few seconds per line. Log
+in once with `claude auth login` before switching to it.
 
 Channel names come from the log: `Trade`, `LookingForGroup`, `General`, `Guild`,
 `Say`, `Yell`, `Whisper`, `Whisper to`, `Party`, `Raid`. Case does not matter.

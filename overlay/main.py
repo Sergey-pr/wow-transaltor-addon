@@ -34,8 +34,13 @@ DEFAULTS = {
     "chat_language": "nl",
     "my_language": "en",
     "chat_log_path": "",
+    # "ollama" runs a local model; "claude" goes through the Claude Code CLI
+    # on a claude.ai subscription.
+    "backend": "ollama",
     "ollama_host": "http://127.0.0.1:11434",
     "model": "aya-expanse:8b",
+    "claude_model": "haiku",
+    "claude_path": "",
     # Generous on purpose: loading an 8B model off disk can take half a minute
     # on a machine without the VRAM to hold it.
     "timeout_seconds": 120,
@@ -218,6 +223,7 @@ def main():
         on_card=on_card,
         on_refresh=lambda: refresh(),
         on_cards=lambda: editor.show(),
+        on_new_card=lambda: adder.show(),
     )
 
     deck = cards.Deck(CARDS_PATH, *card_bounds(config))
@@ -226,6 +232,9 @@ def main():
         host=config["ollama_host"],
         model=config["model"],
         timeout=config["timeout_seconds"],
+        backend=config["backend"],
+        claude_model=config["claude_model"],
+        claude_path=config["claude_path"],
     )
 
     # ------------------------------------------------------------- producers
@@ -323,15 +332,18 @@ def main():
 
         threading.Thread(target=run, daemon=True).start()
 
-    def check_ollama():
+    def check_backend():
         ok, detail = translator.available()
         if not ok:
             events.put(("status", detail, True))
             return
         # Pay the weight-loading wait here rather than on the first click.
-        events.put(("status", "loading %s…" % config["model"], False))
+        events.put(("status", "loading %s…" % translator.model_name, False))
         warmed = translator.warm() is not None
         events.put(("model", warmed, None))
+
+    def backend_title():
+        return "Claude" if config["backend"] == "claude" else "Ollama"
 
     def start_workers(count):
         while worker_count[0] < count:
@@ -352,8 +364,8 @@ def main():
         reader[0] = chatlog.LogReader(path, from_start=True)
         primed[0] = False
         refresh()
-        window.set_status("connecting to Ollama…")
-        threading.Thread(target=check_ollama, daemon=True).start()
+        window.set_status("connecting to %s…" % backend_title())
+        threading.Thread(target=check_backend, daemon=True).start()
 
     # -------------------------------------------------------------- settings
 
@@ -364,10 +376,14 @@ def main():
         save_config(config)
 
         translator.configure(host=config["ollama_host"], model=config["model"],
-                             timeout=config["timeout_seconds"])
+                             timeout=config["timeout_seconds"],
+                             backend=config["backend"],
+                             claude_model=config["claude_model"],
+                             claude_path=config["claude_path"])
         window.set_opacity(config["opacity"])
         window.set_font_size(int(config["font_size"]))
         popup.font_size = int(config["font_size"])  # takes effect on the next card
+        adder.font_size = int(config["font_size"])  # and on the next new-card window
         window.max_lines = config["max_lines"]
         window.set_direction(config["chat_language"], config["my_language"])
         composer.set_direction(config["my_language"], config["chat_language"])
@@ -379,8 +395,8 @@ def main():
             window.clear()
             start_reader()
         else:
-            window.set_status("settings saved — checking Ollama…")
-            threading.Thread(target=check_ollama, daemon=True).start()
+            window.set_status("settings saved — checking %s…" % backend_title())
+            threading.Thread(target=check_backend, daemon=True).start()
 
     composer = ui.Composer(window.root, compose_request,
                            geometry=config["compose_geometry"])
@@ -406,7 +422,7 @@ def main():
 
     popup = ui.CardPopup(window.root, on_answer, font_size=int(config["font_size"]),
                          preview=deck.preview, on_skip=on_skip)
-    def fill_card(card):
+    def fill_card(card, done=None):
         """Fills in whatever a hand-typed card was left missing.
 
         A card typed in by hand is usually just a word, so the example sentence
@@ -431,10 +447,35 @@ def main():
                     card.word, card.sentence or card.word, source, target,
                     rendered=card.sentence_translation) or ""
             deck.save()
-            window.root.after(0, editor.reload)
+            window.root.after(0, lambda: filled(card, done))
 
         if card.source and card.target and card.source != card.target:
             threading.Thread(target=run, daemon=True).start()
+
+    def filled(card, done):
+        # The editor may never have been opened, or closed in the meantime.
+        if editor.window is not None and editor.window.winfo_exists():
+            editor.reload()
+        if done:
+            done(card)
+
+    def add_card(word):
+        """A bare word typed into the new-card window. Returns (card, error)."""
+        source, target = config["chat_language"], config["my_language"]
+        if target == "auto" or source == target:
+            return None, "set a chat and my language first"
+        # Claim rather than ask: the same word may be mid-build from a chat line.
+        if not deck.claim(word, source):
+            return None, "'%s' is already in the deck" % word
+        card = deck.new_card(word=word, sentence="", source=source, target=target)
+        deck.add(card)
+        deck.release(word, source)
+        fill_card(card, done=adder.show_card)
+        return card, None
+
+    adder = ui.CardAdder(
+        window.root, add_card, font_size=int(config["font_size"]),
+        direction=lambda: (config["chat_language"], config["my_language"]))
 
     editor = ui.CardEditor(
         window.root, deck, on_translate=fill_card,
@@ -510,7 +551,7 @@ def main():
                 elif kind == "model":
                     model_state[0] = ("model ready", False) if first else (
                         "%s did not answer — too big for this machine?"
-                        % config["model"], True)
+                        % translator.model_name, True)
                     show_state()
 
                 elif kind == "status":

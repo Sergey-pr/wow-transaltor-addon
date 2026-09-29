@@ -35,7 +35,8 @@ class Overlay:
 
     def __init__(self, geometry="520x320+40+40", opacity=0.88, font_size=10,
                  max_lines=200, on_close=None, on_compose=None, on_settings=None,
-                 on_translate=None, on_card=None, on_refresh=None, on_cards=None):
+                 on_translate=None, on_card=None, on_refresh=None, on_cards=None,
+                 on_new_card=None):
         self.max_lines = max_lines
         self.on_close = on_close
         self.on_compose = on_compose
@@ -44,6 +45,7 @@ class Overlay:
         self.on_card = on_card
         self.on_refresh = on_refresh
         self.on_cards = on_cards
+        self.on_new_card = on_new_card
         self.font_size = font_size
         self.opacity = opacity
         self._message_count = 0
@@ -89,8 +91,9 @@ class Overlay:
         _header_button(header, "clear", self.clear)
         _header_button(header, "⚙", lambda: self.on_settings and self.on_settings())
         _header_button(header, "write", lambda: self.on_compose and self.on_compose())
-        _header_button(header, "+card", self._card_from_selection)
         _header_button(header, "cards", lambda: self.on_cards and self.on_cards())
+        _header_button(header, "new card",
+                       lambda: self.on_new_card and self.on_new_card())
 
         self.refresh_button = _header_button(header, "refresh", self._refresh)
 
@@ -108,6 +111,18 @@ class Overlay:
         self.text.bind("<Button-3>", self._card_from_pointer)
         self._apply_tags()
 
+        # Floats over a selection in a chat line and turns it into a card.
+        self.bubble = tk.Label(self.root, text="add card", bg=FG_SENDER, fg=BG,
+                               font=("Segoe UI", 8, "bold"), padx=6, pady=1,
+                               cursor="hand2")
+        self.bubble.bind("<Button-1>", lambda _e: self._card_from_bubble())
+        # Checked once the release is done: by then the selection is final.
+        self.text.bind("<ButtonRelease-1>",
+                       lambda _e: self.root.after_idle(self._place_bubble), add="+")
+        self.text.bind("<Button-1>", lambda _e: self.bubble.place_forget(), add="+")
+        # Any scroll, by wheel or by new chat arriving, moves the selection.
+        self.text.configure(yscrollcommand=lambda *_a: self._place_bubble())
+
     def _card_from_pointer(self, event):
         """Right-click makes a card straight from the word under the cursor."""
         if not self.on_card:
@@ -119,14 +134,31 @@ class Overlay:
             self.set_status("cards come from the original line, not the translation")
         return "break"
 
-    def _card_from_selection(self):
-        if not self.on_card:
-            return
+    def _card_from_bubble(self):
         found = self.selected_word()
-        if found:
+        self.text.tag_remove("sel", "1.0", "end")
+        self.bubble.place_forget()
+        if found and self.on_card:
             self.on_card(*found)
-        else:
-            self.set_status("select a word in a chat line first")
+        return "break"
+
+    def _place_bubble(self):
+        """Puts the bubble just above the selection, or hides it when there is
+        no selection in a chat line or it has scrolled out of sight."""
+        box = self.text.bbox("sel.first") if self.selected_word() else None
+        if not box:
+            self.bubble.place_forget()
+            return
+        x, y, _width, height = box
+        left, top = self.text.winfo_x(), self.text.winfo_y()
+        bubble_w = self.bubble.winfo_reqwidth()
+        bubble_h = self.bubble.winfo_reqheight()
+        above = y - bubble_h - 2
+        # No room above the first visible line: hang it underneath instead.
+        y = above if above >= 0 else y + height + 2
+        x = min(max(0, x), self.text.winfo_width() - bubble_w)
+        self.bubble.place(x=left + x, y=top + y)
+        self.bubble.lift()
 
     def _build_grip(self):
         grip = tk.Label(self.root, text="◢", bg=BG, fg=FG_CHANNEL, cursor="sizing")
@@ -687,6 +719,141 @@ class CardPopup:
             self.on_skip(card)
 
 
+class CardAdder:
+    """Type a word, get a card: its meaning and an example are written for it."""
+
+    def __init__(self, parent, on_add, direction=None, font_size=10):
+        self.parent = parent
+        # on_add(word) -> (card, error). The card comes back filled later,
+        # through show_card, once the model has written the rest.
+        self.on_add = on_add
+        # direction() -> (source, target), shown so the word goes in the right way.
+        self.direction = direction
+        self.font_size = font_size
+        self.window = None
+        self.card = None        # the card on screen, None while typing a word
+
+    def show(self):
+        if self.window is None or not self.window.winfo_exists():
+            self._build()
+        self.window.deiconify()
+        self.window.lift()
+        self.window.focus_force()
+        self._paint_direction()
+        if self.card is None:
+            self.entry.focus_set()
+
+    def _build(self):
+        window = tk.Toplevel(self.parent)
+        window.title("New card")
+        window.configure(bg=BG)
+        window.attributes("-topmost", True)
+        window.resizable(False, False)
+        window.protocol("WM_DELETE_WINDOW", window.destroy)
+        # Enter adds the word, and once it is added, starts the next one.
+        window.bind("<Return>", lambda _e: self._add() if self.card is None
+                    else self._another())
+        window.bind("<Escape>", lambda _e: window.destroy())
+        self.window = window
+        self.card = None
+
+        body = tk.Frame(window, bg=BG, padx=16, pady=12)
+        body.pack(fill="both", expand=True)
+
+        self.direction_label = tk.Label(body, bg=BG, fg=FG_SENDER, anchor="w",
+                                        font=("Segoe UI", 9, "bold"))
+        self.direction_label.pack(fill="x", pady=(0, 6))
+
+        row = tk.Frame(body, bg=BG)
+        row.pack(fill="x")
+        self.word = tk.StringVar()
+        self.entry = tk.Entry(row, textvariable=self.word, bg=BG_INPUT,
+                              fg=FG_TRANSLATION, insertbackground=FG_TRANSLATION,
+                              disabledbackground=BG_INPUT,
+                              disabledforeground=FG_TRANSLATION, bd=0,
+                              highlightthickness=1, highlightbackground="#2a3040",
+                              highlightcolor=FG_SENDER, width=28,
+                              font=("Segoe UI", self.font_size + 4))
+        self.entry.pack(side="left", fill="x", expand=True, ipady=4)
+        self.add_button = self._button(row, "Add  (Enter)", self._add, FG_OK)
+        self.add_button.pack(side="left", padx=(8, 0), fill="y")
+
+        self.status = tk.Label(body, text="type a word to learn", bg=BG,
+                               fg=FG_STATUS, font=("Segoe UI", 8), anchor="w")
+        self.status.pack(fill="x", pady=(6, 0))
+
+        # What the model wrote, filled in once it answers.
+        self.result = tk.Frame(body, bg=BG)
+        tk.Frame(self.result, bg="#2a3040", height=1).pack(fill="x", pady=(10, 8))
+        self.means = self._text(self.result, FG_OK, (self.font_size + 5, "bold"))
+        self.sentence = self._text(self.result, FG_ORIGINAL, (self.font_size, "italic"))
+        self.sentence_translation = self._text(self.result, FG_TRANSLATION,
+                                               (self.font_size,))
+
+        self.another_button = self._button(body, "Add another card  (Enter)",
+                                           self._another, FG_SENDER)
+
+    def _text(self, parent, colour, font):
+        label = tk.Label(parent, text="", bg=BG, fg=colour, font=("Segoe UI",) + font,
+                         wraplength=400, justify="left", anchor="w")
+        label.pack(fill="x", pady=(0, 6))
+        return label
+
+    def _button(self, parent, text, command, colour):
+        return tk.Button(parent, text=text, command=command, bg=BG_HEADER, fg=colour,
+                         activebackground="#2a3040", activeforeground=colour, bd=0,
+                         padx=12, pady=4, font=("Segoe UI", 9), cursor="hand2")
+
+    def _paint_direction(self):
+        if not self.direction:
+            return
+        source, target = self.direction()
+        self.direction_label.config(text="%s → %s" % (languages.name_for(source),
+                                                      languages.name_for(target)))
+
+    def _add(self):
+        word = self.word.get().strip()
+        if not word:
+            self.status.config(text="type a word first", fg=FG_ERROR)
+            return
+        card, error = self.on_add(word)
+        if error:
+            self.status.config(text=error, fg=FG_ERROR)
+            return
+        self.card = card
+        self.entry.config(state="disabled")
+        self.add_button.config(state="disabled")
+        self.status.config(text="added — writing the meaning and an example…",
+                           fg=FG_SENDER)
+        self.another_button.pack(fill="x", pady=(12, 0))
+
+    def show_card(self, card):
+        """The card came back from the model. Ignored if the window moved on."""
+        if card is not self.card or not self.window or not self.window.winfo_exists():
+            return
+        failed = "(failed)"
+        self.means.config(text=card.word_translation or failed)
+        self.sentence.config(text=card.sentence or failed)
+        self.sentence_translation.config(text=card.sentence_translation or failed)
+        self.result.pack(fill="x", before=self.another_button)
+        complete = card.word_translation and card.sentence and card.sentence_translation
+        self.status.config(text="'%s' is in the deck" % card.word if complete else
+                           "'%s' is in the deck, but some of it could not be "
+                           "written — fix it under cards" % card.word,
+                           fg=FG_OK if complete else FG_ERROR)
+
+    def _another(self):
+        self.card = None
+        self.result.pack_forget()
+        self.another_button.pack_forget()
+        self.entry.config(state="normal")
+        self.add_button.config(state="normal")
+        self.word.set("")
+        self.status.config(text="type a word to learn", fg=FG_STATUS)
+        self._paint_direction()
+        self.entry.focus_set()
+
+
 class CardEditor:
     """Browse the deck: add a card by hand, fix a translation, drop one."""
 
@@ -979,9 +1146,14 @@ class CardEditor:
 class Settings:
     """Dialog over config.json. Hands a plain dict back to the caller on save."""
 
+    BACKENDS = [("ollama", "Local (Ollama)"), ("claude", "Claude (subscription)")]
+    CLAUDE_MODELS = ["haiku", "sonnet", "opus"]
+
     FIELDS_TEXT = [
         ("ollama_host", "Ollama host"),
-        ("model", "Model"),
+        ("model", "Ollama model"),
+        ("claude_model", "Claude model"),
+        ("claude_path", "Claude Code path (blank = auto)"),
         ("chat_log_path", "Chat log path (blank = auto)"),
         ("channels", "Channels (comma separated, blank = all)"),
         ("ignore_senders", "Ignore senders (comma separated)"),
@@ -1059,7 +1231,7 @@ class Settings:
                      row=row, column=0, columnspan=2, sticky="w", pady=(0, 10))
         row += 1
 
-        # --- model and filtering
+        # --- backend, model and filtering
         tk.Label(body, text="Model and filtering", bg=BG, fg=FG_SENDER,
                  font=("Segoe UI", 9, "bold"), anchor="w").grid(
                      row=row, column=0, columnspan=2, sticky="w", pady=(4, 6))
@@ -1067,14 +1239,23 @@ class Settings:
 
         installed = self.models_provider() if self.models_provider else []
 
+        label("Translate with", row)
+        titles = dict(self.BACKENDS)
+        self.vars["backend"] = tk.StringVar(
+            value=titles.get(self.config.get("backend", "ollama"), titles["ollama"]))
+        ttk.Combobox(body, textvariable=self.vars["backend"], values=list(titles.values()),
+                     state="readonly", width=28).grid(row=row, column=1, sticky="ew", pady=4)
+        row += 1
+
         for key, title in self.FIELDS_TEXT:
             label(title, row)
             value = self.config.get(key, "")
             if isinstance(value, list):
                 value = ", ".join(value)
             self.vars[key] = tk.StringVar(value=value)
-            if key == "model" and installed:
-                ttk.Combobox(body, textvariable=self.vars[key], values=installed,
+            choices = {"model": installed, "claude_model": self.CLAUDE_MODELS}.get(key)
+            if choices:
+                ttk.Combobox(body, textvariable=self.vars[key], values=choices,
                              width=28).grid(row=row, column=1, sticky="ew", pady=4)
             else:
                 tk.Entry(body, textvariable=self.vars[key], bg=BG_INPUT,
@@ -1133,6 +1314,9 @@ class Settings:
         if updated["chat_language"] == updated["my_language"]:
             self.error.config(text="Chat language and my language must differ.")
             return
+
+        chosen = self.vars["backend"].get()
+        updated["backend"] = next(code for code, title in self.BACKENDS if title == chosen)
 
         for key, _title in self.FIELDS_TEXT:
             value = self.vars[key].get().strip()

@@ -1,7 +1,16 @@
-"""Translation through a local Ollama model, in either direction."""
+"""Translation in either direction, through a local Ollama model or Claude.
 
+Claude is reached through the Claude Code CLI (`claude -p`), which signs in
+with a claude.ai subscription, so no API key and no per-token billing.
+"""
+
+import glob
 import json
+import os
 import re
+import shutil
+import subprocess
+import tempfile
 import threading
 import urllib.error
 import urllib.request
@@ -86,8 +95,7 @@ uses it, nothing else.
 
 Rules:
 - Write in {source} only. Never translate it, never explain, never add notes.
-- One sentence, 4 to 10 words, the kind a World of Warcraft player would type
-  in chat.
+- One sentence, 4 to 10 words, plain everyday language.
 - The sentence must contain the word itself.
 - No quotes, no bullet, no label, no second line."""
 
@@ -206,17 +214,58 @@ def should_translate(text, source_code, target_code):
     return len(words) > 1
 
 
+def find_claude(configured=""):
+    """The Claude Code executable: the configured path, PATH, or the copy the
+    Claude desktop app keeps for itself (newest version wins)."""
+    if configured:
+        return configured if os.path.isfile(configured) else None
+    found = shutil.which("claude")
+    if found:
+        return found
+    candidates = [os.path.join(os.path.expanduser("~"), ".local", "bin", "claude.exe")]
+    # The Store (MSIX) build of the app writes its Roaming folder under its
+    # package, and only the app itself sees it at the usual APPDATA path.
+    patterns = []
+    local = os.environ.get("LOCALAPPDATA")
+    if local:
+        patterns.append(os.path.join(local, "Packages", "Claude_*", "LocalCache",
+                                     "Roaming", "Claude", "claude-code", "*", "claude.exe"))
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        patterns.append(os.path.join(appdata, "Claude", "claude-code", "*", "claude.exe"))
+    bundled = [path for pattern in patterns for path in glob.glob(pattern)]
+    candidates += sorted(bundled, key=_version_key, reverse=True)
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+def _version_key(path):
+    folder = os.path.basename(os.path.dirname(path))
+    return [int(part) if part.isdigit() else 0 for part in folder.split(".")]
+
+
+# pythonw has no console, and every child would otherwise flash one open.
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
 class Translator:
     def __init__(self, host="http://127.0.0.1:11434", model="qwen2.5:3b",
-                 timeout=30, cache_size=2000):
+                 timeout=30, cache_size=2000, backend="ollama",
+                 claude_model="haiku", claude_path=""):
         self.host = host.rstrip("/")
         self.model = model
         self.timeout = timeout
+        self.backend = backend
+        self.claude_model = claude_model
+        self.claude_path = claude_path
         self._cache = OrderedDict()
         self._cache_size = cache_size
         self._lock = threading.Lock()
 
-    def configure(self, host=None, model=None, timeout=None):
+    def configure(self, host=None, model=None, timeout=None, backend=None,
+                  claude_model=None, claude_path=None):
         """Applies settings changed at runtime and drops now-stale cache entries."""
         with self._lock:
             if host is not None and host.rstrip("/") != self.host:
@@ -225,10 +274,45 @@ class Translator:
             if model is not None and model != self.model:
                 self.model = model
                 self._cache.clear()
+            if backend is not None and backend != self.backend:
+                self.backend = backend
+                self._cache.clear()
+            if claude_model is not None and claude_model != self.claude_model:
+                self.claude_model = claude_model
+                self._cache.clear()
+            if claude_path is not None:
+                self.claude_path = claude_path
             if timeout is not None:
                 self.timeout = timeout
 
+    @property
+    def model_name(self):
+        """What the status line calls the model currently answering."""
+        if self.backend == "claude":
+            return "claude " + self.claude_model
+        return self.model
+
     def available(self):
+        """Checks that the chosen backend can answer at all."""
+        if self.backend == "claude":
+            return self._claude_available()
+        return self._ollama_available()
+
+    def _claude_available(self):
+        exe = find_claude(self.claude_path)
+        if not exe:
+            return False, "Claude Code not found. Install it or set its path in settings"
+        try:
+            done = subprocess.run([exe, "auth", "status"], capture_output=True,
+                                  timeout=30, creationflags=_NO_WINDOW)
+            status = json.loads(done.stdout.decode("utf-8", "replace"))
+        except (OSError, subprocess.SubprocessError, ValueError) as exc:
+            return False, "Claude Code did not start (%s)" % exc
+        if not status.get("loggedIn"):
+            return False, "Claude Code is not logged in. Run: claude auth login"
+        return True, "ok"
+
+    def _ollama_available(self):
         """Checks that Ollama is up and the model is pulled."""
         try:
             with urllib.request.urlopen(self.host + "/api/tags", timeout=5) as response:
@@ -355,9 +439,44 @@ class Translator:
         machine, which is long enough to trip the request timeout and lose the
         first translation of a session.
         """
+        if self.backend == "claude":
+            return "ok"            # nothing to load, and a call costs usage
         return self._ask("Reply with: ok", "ok", temperature=0, predict=2)
 
     def _ask(self, system, user, temperature, predict):
+        if self.backend == "claude":
+            # The CLI has no temperature or length knobs; the prompts already
+            # ask for short answers.
+            return self._ask_claude(system, user)
+        return self._ask_ollama(system, user, temperature, predict)
+
+    def _ask_claude(self, system, user):
+        with self._lock:
+            model, timeout, configured = self.claude_model, self.timeout, self.claude_path
+        exe = find_claude(configured)
+        if not exe:
+            return None
+
+        # --system-prompt replaces Claude Code's own agent prompt, and with no
+        # tools, MCP servers or settings it answers as a plain model would.
+        # The message goes through stdin: a command line would mangle quotes.
+        # Run from the temp folder so no project CLAUDE.md gets pulled in.
+        command = [exe, "-p", "--system-prompt", system,
+                   "--tools", "", "--strict-mcp-config", "--setting-sources", "",
+                   "--no-session-persistence", "--output-format", "text"]
+        if model:
+            command += ["--model", model]
+        try:
+            done = subprocess.run(command, input=user.encode("utf-8"),
+                                  capture_output=True, timeout=timeout,
+                                  cwd=tempfile.gettempdir(), creationflags=_NO_WINDOW)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if done.returncode != 0:
+            return None
+        return _clean(done.stdout.decode("utf-8", "replace"))
+
+    def _ask_ollama(self, system, user, temperature, predict):
         with self._lock:
             model, host, timeout = self.model, self.host, self.timeout
 
@@ -386,11 +505,12 @@ class Translator:
         except (urllib.error.URLError, OSError, ValueError):
             return None
 
-        result = (payload.get("message") or {}).get("content", "").strip()
-        if not result:
-            return None
+        return _clean((payload.get("message") or {}).get("content", ""))
 
-        # Small models sometimes wrap the answer in quotes despite the prompt.
-        if len(result) > 1 and result[0] == result[-1] and result[0] in "\"'":
-            result = result[1:-1].strip()
-        return result or None
+
+def _clean(result):
+    result = result.strip()
+    # Small models sometimes wrap the answer in quotes despite the prompt.
+    if len(result) > 1 and result[0] == result[-1] and result[0] in "\"'":
+        result = result[1:-1].strip()
+    return result or None
