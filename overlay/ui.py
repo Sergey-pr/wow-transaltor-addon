@@ -720,18 +720,24 @@ class CardPopup:
 
 
 class CardAdder:
-    """Type a word, get a card: its meaning and an example are written for it."""
+    """Type a word, get a card: an example, and the meaning unless it was
+    typed in too, are written for it."""
 
-    def __init__(self, parent, on_add, direction=None, font_size=10):
+    def __init__(self, parent, on_add, direction=None, font_size=10,
+                 on_regenerate=None):
         self.parent = parent
-        # on_add(word) -> (card, error). The card comes back filled later,
+        # on_add(word, meaning) -> (card, error). The card comes back filled later,
         # through show_card, once the model has written the rest.
         self.on_add = on_add
+        # on_regenerate(card, meaning) writes a new example for an edited (or
+        # the same) meaning; the card comes back through show_card as well.
+        self.on_regenerate = on_regenerate
         # direction() -> (source, target), shown so the word goes in the right way.
         self.direction = direction
         self.font_size = font_size
         self.window = None
         self.card = None        # the card on screen, None while typing a word
+        self.busy = False       # the model is still writing the card
 
     def show(self):
         if self.window is None or not self.window.winfo_exists():
@@ -754,8 +760,10 @@ class CardAdder:
         window.bind("<Return>", lambda _e: self._add() if self.card is None
                     else self._another())
         window.bind("<Escape>", lambda _e: window.destroy())
+        window.bind("<Control-r>", lambda _e: self._regenerate())
         self.window = window
         self.card = None
+        self.busy = False
 
         body = tk.Frame(window, bg=BG, padx=16, pady=12)
         body.pack(fill="both", expand=True)
@@ -778,6 +786,24 @@ class CardAdder:
         self.add_button = self._button(row, "Add  (Enter)", self._add, FG_OK)
         self.add_button.pack(side="left", padx=(8, 0), fill="y")
 
+        # Optional: typed in, it is kept as is and the example is written
+        # around it; left blank, the model looks the word up itself.
+        self.meaning_label = tk.Label(body, bg=BG, fg=FG_STATUS, anchor="w",
+                                      font=("Segoe UI", 8))
+        self.meaning_label.pack(fill="x", pady=(8, 2))
+        self.meaning = tk.StringVar()
+        self.meaning_entry = tk.Entry(body, textvariable=self.meaning, bg=BG_INPUT,
+                                      fg=FG_OK, insertbackground=FG_OK,
+                                      disabledbackground=BG_INPUT,
+                                      disabledforeground=FG_OK, bd=0,
+                                      highlightthickness=1, highlightbackground="#2a3040",
+                                      highlightcolor=FG_SENDER,
+                                      font=("Segoe UI", self.font_size + 2))
+        self.meaning_entry.pack(fill="x", ipady=3)
+        # Once the card is written, Enter in the meaning means "try again with
+        # this", not "next card".
+        self.meaning_entry.bind("<Return>", self._meaning_return)
+
         self.status = tk.Label(body, text="type a word to learn", bg=BG,
                                fg=FG_STATUS, font=("Segoe UI", 8), anchor="w")
         self.status.pack(fill="x", pady=(6, 0))
@@ -790,6 +816,9 @@ class CardAdder:
         self.sentence_translation = self._text(self.result, FG_TRANSLATION,
                                                (self.font_size,))
 
+        self.regenerate_button = self._button(
+            body, "Regenerate example for this meaning  (Ctrl+R)",
+            self._regenerate, FG_OK)
         self.another_button = self._button(body, "Add another card  (Enter)",
                                            self._another, FG_SENDER)
 
@@ -810,20 +839,27 @@ class CardAdder:
         source, target = self.direction()
         self.direction_label.config(text="%s → %s" % (languages.name_for(source),
                                                       languages.name_for(target)))
+        self.meaning_label.config(text="%s meaning, optional — several senses are "
+                                       "fine: commas between them, (notes) in brackets"
+                                       % languages.name_for(target))
 
     def _add(self):
         word = self.word.get().strip()
         if not word:
             self.status.config(text="type a word first", fg=FG_ERROR)
             return
-        card, error = self.on_add(word)
+        meaning = self.meaning.get().strip()
+        card, error = self.on_add(word, meaning)
         if error:
             self.status.config(text=error, fg=FG_ERROR)
             return
         self.card = card
+        self.busy = True
         self.entry.config(state="disabled")
+        self.meaning_entry.config(state="disabled")
         self.add_button.config(state="disabled")
-        self.status.config(text="added — writing the meaning and an example…",
+        self.status.config(text="added — writing an example for that meaning…" if meaning
+                           else "added — writing the meaning and an example…",
                            fg=FG_SENDER)
         self.another_button.pack(fill="x", pady=(12, 0))
 
@@ -831,24 +867,55 @@ class CardAdder:
         """The card came back from the model. Ignored if the window moved on."""
         if card is not self.card or not self.window or not self.window.winfo_exists():
             return
+        self.busy = False
         failed = "(failed)"
         self.means.config(text=card.word_translation or failed)
         self.sentence.config(text=card.sentence or failed)
         self.sentence_translation.config(text=card.sentence_translation or failed)
         self.result.pack(fill="x", before=self.another_button)
+        # The meaning stays open to edit: change it, or keep it, and write
+        # the example again.
+        self.meaning_entry.config(state="normal")
+        self.meaning.set(card.word_translation)
+        if self.on_regenerate:
+            self.regenerate_button.config(state="normal")
+            self.regenerate_button.pack(fill="x", pady=(12, 0), before=self.another_button)
         complete = card.word_translation and card.sentence and card.sentence_translation
-        self.status.config(text="'%s' is in the deck" % card.word if complete else
-                           "'%s' is in the deck, but some of it could not be "
-                           "written — fix it under cards" % card.word,
+        self.status.config(text="'%s' is in the deck — edit the meaning and "
+                                "regenerate for another example" % card.word if complete
+                           else "'%s' is in the deck, but some of it could not be "
+                           "written — regenerate, or fix it under cards" % card.word,
                            fg=FG_OK if complete else FG_ERROR)
+
+    def _meaning_return(self, _event):
+        if self.card is None:
+            return None         # still typing: Enter adds the card as usual
+        self._regenerate()
+        return "break"
+
+    def _regenerate(self):
+        if self.card is None or self.busy or not self.on_regenerate:
+            return
+        meaning = self.meaning.get().strip()
+        self.busy = True
+        self.meaning_entry.config(state="disabled")
+        self.regenerate_button.config(state="disabled")
+        self.status.config(text="writing a new example for that meaning…" if meaning
+                           else "writing the meaning and a new example…",
+                           fg=FG_SENDER)
+        self.on_regenerate(self.card, meaning)
 
     def _another(self):
         self.card = None
+        self.busy = False
         self.result.pack_forget()
+        self.regenerate_button.pack_forget()
         self.another_button.pack_forget()
         self.entry.config(state="normal")
+        self.meaning_entry.config(state="normal")
         self.add_button.config(state="normal")
         self.word.set("")
+        self.meaning.set("")
         self.status.config(text="type a word to learn", fg=FG_STATUS)
         self._paint_direction()
         self.entry.focus_set()

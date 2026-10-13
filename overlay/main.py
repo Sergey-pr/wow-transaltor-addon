@@ -422,26 +422,39 @@ def main():
 
     popup = ui.CardPopup(window.root, on_answer, font_size=int(config["font_size"]),
                          preview=deck.preview, on_skip=on_skip)
-    def fill_card(card, done=None):
+    def fill_card(card, done=None, fresh=False):
         """Fills in whatever a hand-typed card was left missing.
 
         A card typed in by hand is usually just a word, so the example sentence
         is written here too -- first in the language being learned, then
         translated like any other line. The word goes last: looked up on its
         own it picks whichever sense comes to mind, which need not be the one
-        the sentence and its translation went with.
+        the sentence and its translation went with. `fresh` writes a new
+        example even when one for this word and meaning was written before.
         """
         def run():
             source, target = card.source, card.target
-            if not card.sentence:
-                # A meaning typed in by hand steers the example onto that sense.
+            # A meaning typed in by hand steers both the example and its
+            # translation onto that sense.
+            meaning = card.word_translation
+            if not card.sentence and meaning:
+                # Written together, so the translation renders the word with
+                # one of the senses given rather than whatever an idiom wants.
+                sentence, rendered = translator.make_example(
+                    card.word, meaning, source, target, fresh=fresh)
+                card.sentence = sentence or ""
+                card.sentence_translation = rendered or ""
+            elif not card.sentence:
                 card.sentence = translator.make_sentence(
-                    card.word, source, meaning=card.word_translation) or ""
+                    card.word, source, fresh=fresh) or ""
                 # A freshly written sentence has no translation to keep.
                 card.sentence_translation = ""
             if card.sentence and not card.sentence_translation:
-                card.sentence_translation = translator.translate(
-                    card.sentence, source, target) or ""
+                # Not the chat prompt: an example is plain language, and game
+                # jargon has no place in it.
+                card.sentence_translation = translator.translate_example(
+                    card.sentence, source, target,
+                    word=card.word, meaning=meaning) or ""
             if not card.word_translation:
                 card.word_translation = translator.translate_word(
                     card.word, card.sentence or card.word, source, target,
@@ -459,22 +472,33 @@ def main():
         if done:
             done(card)
 
-    def add_card(word):
-        """A bare word typed into the new-card window. Returns (card, error)."""
+    def add_card(word, meaning=""):
+        """A word typed into the new-card window, with its meaning if one was
+        typed too. Returns (card, error)."""
         source, target = config["chat_language"], config["my_language"]
         if target == "auto" or source == target:
             return None, "set a chat and my language first"
         # Claim rather than ask: the same word may be mid-build from a chat line.
         if not deck.claim(word, source):
             return None, "'%s' is already in the deck" % word
-        card = deck.new_card(word=word, sentence="", source=source, target=target)
+        card = deck.new_card(word=word, sentence="", word_translation=meaning,
+                             source=source, target=target)
         deck.add(card)
         deck.release(word, source)
         fill_card(card, done=adder.show_card)
         return card, None
 
+    def regenerate_card(card, meaning):
+        """A new example for the card in the new-card window, written around
+        the meaning as it now stands; a cleared meaning is looked up again."""
+        card.word_translation = meaning
+        card.sentence = ""
+        card.sentence_translation = ""
+        fill_card(card, done=adder.show_card, fresh=True)
+
     adder = ui.CardAdder(
         window.root, add_card, font_size=int(config["font_size"]),
+        on_regenerate=regenerate_card,
         direction=lambda: (config["chat_language"], config["my_language"]))
 
     editor = ui.CardEditor(

@@ -56,6 +56,8 @@ The user sends one {source} word. Reply with its {target} meaning, nothing else.
 Rules:
 - 1 to 3 {target} words. No sentence, no punctuation, no explanation.
 - Never reply in {source}, never repeat the word back, never transliterate it.
+- Your whole reply is the word or words themselves. No reasoning, not even
+  when the answer is a single short word such as a preposition.
 - If it is a verb, give the {target} infinitive.
 - Context, for picking the right sense only -- do not translate it: "{sentence}\""""
 
@@ -77,17 +79,45 @@ Rules:
   there first, then the {target} words that translate that word itself, not
   the words next to it.
 - Take them from the {target} sentence above; do not pick another synonym.
+- If no word there stands for it, because a case ending or the word order
+  carries its meaning, reply with its usual {target} dictionary meaning
+  instead. Do not discuss it.
 - Dictionary form: a verb as the {target} infinitive, a noun in the singular.
 - 1 to 3 words. No sentence, no punctuation, no explanation.
-- Never reply in {source}, never repeat the word back."""
+- Never reply in {source}, never repeat the word back.
+- Your whole reply is the word or words themselves. No reasoning, not even
+  when the answer is a single short word such as a preposition."""
 
-# Steers the example toward the sense already written on a hand-made card.
-_SENTENCE_MEANING = """
-- Use the word in the sense of "{meaning}"."""
+# With a meaning typed in, the example and its translation are written in one
+# go: a sentence written blind to its translation drifts into set phrases
+# ("aan tafel", at the table) that render the word some other way. A meaning is
+# often a short dictionary entry, "к, на (вплотную), у": several senses, some
+# narrowed by a note in brackets.
+_PAIR_PROMPT = """You write example sentences for a {source}-{target} flashcard.
+
+The user sends one {source} word and its {target} meaning. Reply with exactly
+two lines, nothing else:
+{source} sentence that uses the word
+its {target} translation
+
+Rules:
+- Use the word in the sense of the {target} meaning. If the meaning lists
+  several senses separated by commas, pick one of them, the first unless
+  another makes a better sentence. A note in brackets narrows the sense right
+  before it; honour it.
+- The translation must render the word with one of the {target} words from the
+  meaning and still read naturally. Avoid set phrases and idioms that a
+  {target} speaker would say with some other word.
+- One sentence, 4 to 10 words, plain everyday language. There is no game or
+  other special context.
+- No quotes, no labels, no numbering, no notes."""
+
+# Line labels models add despite being asked not to: "1.", "Dutch:", "- ".
+_LINE_LABEL = re.compile(r"^\s*(?:[-*•]|\d+[.):]|[^\W\d_]+:)\s*", re.UNICODE)
 
 # A card typed in by hand is usually a bare word, and a word with no example
 # is a word with no context to hang on. The model writes the example in the
-# language being learned; the translation comes from the ordinary chat prompt.
+# language being learned; the translation comes from the example prompt below.
 _SENTENCE_PROMPT = """You write example sentences in {source}.
 
 The user sends one {source} word. Reply with one short {source} sentence that
@@ -98,6 +128,23 @@ Rules:
 - One sentence, 4 to 10 words, plain everyday language.
 - The sentence must contain the word itself.
 - No quotes, no bullet, no label, no second line."""
+
+# A written example is ordinary language, not chat: the chat prompt's game
+# jargon would turn "add" into a monster and "pull" into a fight.
+_EXAMPLE_PROMPT = """You translate example sentences from {source} to {target}.
+
+Rules:
+- Output ONLY the {target} translation. No quotes, no notes, no explanation.
+- Plain everyday language. There is no game or other special context: read
+  every word in its ordinary dictionary sense.
+- Keep it natural, the way a native {target} speaker would say it."""
+
+# Keeps the word on the card's sense, so the sentence and the gloss above it
+# read as the same word.
+_EXAMPLE_MEANING = """
+- The sentence uses the {source} word "{word}" in the sense of the {target}
+  "{meaning}". Render it with that sense, using one of those words where it
+  reads naturally."""
 
 # How long Ollama should hold the weights in memory between translations.
 KEEP_ALIVE = "30m"
@@ -225,15 +272,19 @@ def find_claude(configured=""):
     candidates = [os.path.join(os.path.expanduser("~"), ".local", "bin", "claude.exe")]
     # The Store (MSIX) build of the app writes its Roaming folder under its
     # package, and only the app itself sees it at the usual APPDATA path.
-    patterns = []
+    roots = []
     local = os.environ.get("LOCALAPPDATA")
     if local:
-        patterns.append(os.path.join(local, "Packages", "Claude_*", "LocalCache",
-                                     "Roaming", "Claude", "claude-code", "*", "claude.exe"))
+        roots.append(os.path.join(local, "Packages", "Claude_*", "LocalCache",
+                                  "Roaming", "Claude", "claude-code"))
     appdata = os.environ.get("APPDATA")
     if appdata:
-        patterns.append(os.path.join(appdata, "Claude", "claude-code", "*", "claude.exe"))
-    bundled = [path for pattern in patterns for path in glob.glob(pattern)]
+        roots.append(os.path.join(appdata, "Claude", "claude-code"))
+    # Older apps kept claude-code/<version>/claude.exe; newer ones add a build
+    # hash folder under the version: claude-code/<version>/<hash>/claude.exe.
+    bundled = [path for root in roots
+               for pattern in (("*", "claude.exe"), ("*", "*", "claude.exe"))
+               for path in glob.glob(os.path.join(root, *pattern))]
     candidates += sorted(bundled, key=_version_key, reverse=True)
     for path in candidates:
         if os.path.isfile(path):
@@ -242,7 +293,9 @@ def find_claude(configured=""):
 
 
 def _version_key(path):
-    folder = os.path.basename(os.path.dirname(path))
+    """The version from the folder right under claude-code, wherever the exe sits."""
+    parts = os.path.normpath(path).split(os.sep)
+    folder = parts[parts.index("claude-code") + 1] if "claude-code" in parts else ""
     return [int(part) if part.isdigit() else 0 for part in folder.split(".")]
 
 
@@ -383,41 +436,39 @@ class Translator:
 
         source = languages.name_for(source_code)
         target = languages.name_for(target_code)
+        lookup = _WORD_PROMPT.format(source=source, target=target, sentence=sentence)
+        prompts = [lookup]
         if rendered:
-            system = _WORD_ALIGN_PROMPT.format(source=source, target=target,
-                                               sentence=sentence, rendered=rendered)
-        else:
-            system = _WORD_PROMPT.format(source=source, target=target, sentence=sentence)
-        result = self._ask(system, word, temperature=0.1, predict=40)
-        if result is None:
-            return None
-
-        # A dictionary entry, not a sentence: models like to end it anyway.
-        result = result.rstrip(".").strip()
+            prompts.insert(0, _WORD_ALIGN_PROMPT.format(
+                source=source, target=target, sentence=sentence, rendered=rendered))
+        # A word the translation has no counterpart for can talk a model into
+        # explaining rather than answering; the plain lookup is the fallback.
+        result = None
+        for system in prompts:
+            reply = self._ask(system, word, temperature=0.1, predict=40)
+            result = _short_answer(reply) if reply else None
+            if result:
+                break
         if not result:
             return None
 
         self._store(key, result)
         return result
 
-    def make_sentence(self, word, source_code, meaning=None):
+    def make_sentence(self, word, source_code, fresh=False):
         """Invents an example sentence in the source language for a bare word.
 
-        `meaning`, when the card already has one, keeps the example on that
-        sense of the word rather than whichever the model thinks of first.
+        `fresh` skips the cache, for when the last example was not liked.
         """
         if source_code == "auto":
             return None            # nothing to write the sentence in
 
-        key = ("example", source_code, word.strip().lower(),
-               (meaning or "").strip().lower())
-        hit = self._cached(key)
+        key = ("example", source_code, word.strip().lower())
+        hit = None if fresh else self._cached(key)
         if hit is not None:
             return hit
 
         system = _SENTENCE_PROMPT.format(source=languages.name_for(source_code))
-        if meaning:
-            system += _SENTENCE_MEANING.format(meaning=meaning)
         # Warmer than a lookup: a sentence should read like one, not like the
         # same template every time.
         result = self._ask(system, word, temperature=0.6, predict=60)
@@ -425,8 +476,68 @@ class Translator:
             return None
 
         # Small models like to add the translation on a line of its own.
-        result = result.splitlines()[0].strip()
+        # Or to lead in with "Here is a sentence:".
+        lines = _lines(result)
+        result = lines[0] if lines else None
         if not result:
+            return None
+
+        self._store(key, result)
+        return result
+
+    def make_example(self, word, meaning, source_code, target_code, fresh=False):
+        """Writes an example sentence for a word with a known meaning, and its
+        translation with it. Returns (sentence, translation), either may be None.
+
+        The translation is None when the model gave only the sentence; it can
+        then be translated on its own. `fresh` skips the cache, as above.
+        """
+        if source_code == "auto":
+            return None, None
+
+        key = ("example-pair", source_code, target_code, word.strip().lower(),
+               meaning.strip().lower())
+        hit = None if fresh else self._cached(key)
+        if hit is not None:
+            return hit
+
+        system = _PAIR_PROMPT.format(source=languages.name_for(source_code),
+                                     target=languages.name_for(target_code))
+        user = 'Word: "%s"\nMeaning: "%s"' % (word, meaning)
+        result = self._ask(system, user, temperature=0.6, predict=120)
+        if result is None:
+            return None, None
+
+        lines = _lines(result)
+        if not lines:
+            return None, None
+        pair = (lines[0], lines[1] if len(lines) > 1 else None)
+        if pair[1]:
+            self._store(key, pair)
+        return pair
+
+    def translate_example(self, sentence, source_code, target_code, word=None,
+                          meaning=None):
+        """Translates a card's example sentence as plain language, not chat.
+
+        `word` and `meaning`, when the card has both, keep the translation on
+        the sense the card teaches.
+        """
+        key = ("example-translation", source_code, target_code,
+               sentence.strip().lower(), (word or "").strip().lower(),
+               (meaning or "").strip().lower())
+        hit = self._cached(key)
+        if hit is not None:
+            return hit
+
+        source = languages.name_for(source_code)
+        target = languages.name_for(target_code)
+        system = _EXAMPLE_PROMPT.format(source=source, target=target)
+        if word and meaning:
+            system += _EXAMPLE_MEANING.format(source=source, target=target,
+                                              word=word, meaning=meaning)
+        result = self._ask(system, sentence, temperature=0.2, predict=200)
+        if result is None:
             return None
 
         self._store(key, result)
@@ -506,6 +617,40 @@ class Translator:
             return None
 
         return _clean((payload.get("message") or {}).get("content", ""))
+
+
+# Longest gloss a word lookup may come back with; anything longer is the model
+# explaining itself rather than answering.
+_ANSWER_WORDS = 5
+
+
+def _lines(result):
+    """The answer's lines with labels, quotes and lead-ins ("Here is...:") gone."""
+    lines = []
+    for line in result.splitlines():
+        line = line.strip()
+        if not line or line.endswith(":"):
+            continue
+        line = _clean(_LINE_LABEL.sub("", line))
+        if line:
+            lines.append(line)
+    return lines
+
+
+def _short_answer(result):
+    """A dictionary entry out of a reply that may have wrapped it in reasoning.
+
+    Models asked for a word sometimes explain their pick first and give the
+    word on a line of its own at the end, so the last short line wins. A reply
+    with no short line at all is an explanation, not an answer.
+    """
+    # A question is the model thinking aloud ("the answer?"), not answering.
+    short = [line for line in _lines(result)
+             if len(line.split()) <= _ANSWER_WORDS and not line.endswith("?")]
+    if not short:
+        return None
+    # A dictionary entry, not a sentence: models like to end it anyway.
+    return short[-1].rstrip(".").strip() or None
 
 
 def _clean(result):
