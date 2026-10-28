@@ -42,6 +42,15 @@ EASY_BONUS = 1.3
 GRADES = ("again", "hard", "good", "easy")
 
 
+def headword_key(word):
+    """What two cards must share to be the same word.
+
+    A verb card carries its tense forms in brackets, "denken (dacht,
+    gedacht)", and the forms a model writes vary from one lookup to the next.
+    """
+    return word.split(" (")[0].strip().lower()
+
+
 def _clamp(seconds, minimum, maximum):
     # A minimum above the maximum would make the clamp order decide the answer,
     # so the floor wins and the result stays predictable.
@@ -232,8 +241,8 @@ class Deck:
 
     def _holds(self, word, source):
         """has_word without the lock, for callers that already hold it."""
-        needle = word.strip().lower()
-        return any(c.word.strip().lower() == needle and c.source == source
+        needle = headword_key(word)
+        return any(headword_key(c.word) == needle and c.source == source
                    for c in self._cards)
 
     def claim(self, word, source):
@@ -245,7 +254,7 @@ class Deck:
         when the word is already in the deck or already being worked on; the
         caller releases it once the card lands or the attempt fails.
         """
-        key = (word.strip().lower(), source)
+        key = (headword_key(word), source)
         with self._lock:
             if key in self._claimed or self._holds(word, source):
                 return False
@@ -254,7 +263,7 @@ class Deck:
 
     def release(self, word, source):
         with self._lock:
-            self._claimed.discard((word.strip().lower(), source))
+            self._claimed.discard((headword_key(word), source))
 
     def due_card(self, now=None):
         """The most overdue card, or None when nothing is waiting."""

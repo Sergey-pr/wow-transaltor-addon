@@ -721,10 +721,11 @@ class CardPopup:
 
 class CardAdder:
     """Type a word, get a card: an example, and the meaning unless it was
-    typed in too, are written for it."""
+    typed in too, are written for it. Whatever comes back can be edited in
+    place and saved."""
 
     def __init__(self, parent, on_add, direction=None, font_size=10,
-                 on_regenerate=None):
+                 on_regenerate=None, on_save=None):
         self.parent = parent
         # on_add(word, meaning) -> (card, error). The card comes back filled later,
         # through show_card, once the model has written the rest.
@@ -732,6 +733,9 @@ class CardAdder:
         # on_regenerate(card, meaning) writes a new example for an edited (or
         # the same) meaning; the card comes back through show_card as well.
         self.on_regenerate = on_regenerate
+        # on_save(card, word, meaning, sentence, sentence_translation) -> error
+        # or None: keeps what was edited in the preview.
+        self.on_save = on_save
         # direction() -> (source, target), shown so the word goes in the right way.
         self.direction = direction
         self.font_size = font_size
@@ -755,12 +759,13 @@ class CardAdder:
         window.configure(bg=BG)
         window.attributes("-topmost", True)
         window.resizable(False, False)
-        window.protocol("WM_DELETE_WINDOW", window.destroy)
+        window.protocol("WM_DELETE_WINDOW", self._close)
         # Enter adds the word, and once it is added, starts the next one.
         window.bind("<Return>", lambda _e: self._add() if self.card is None
                     else self._another())
-        window.bind("<Escape>", lambda _e: window.destroy())
+        window.bind("<Escape>", lambda _e: self._close())
         window.bind("<Control-r>", lambda _e: self._regenerate())
+        window.bind("<Control-s>", lambda _e: self._save())
         self.window = window
         self.card = None
         self.busy = False
@@ -783,6 +788,8 @@ class CardAdder:
                               highlightcolor=FG_SENDER, width=28,
                               font=("Segoe UI", self.font_size + 4))
         self.entry.pack(side="left", fill="x", expand=True, ipady=4)
+        # Once the card is written, Enter in the word keeps the word as edited.
+        self.entry.bind("<Return>", self._field_return)
         self.add_button = self._button(row, "Add  (Enter)", self._add, FG_OK)
         self.add_button.pack(side="left", padx=(8, 0), fill="y")
 
@@ -808,25 +815,67 @@ class CardAdder:
                                fg=FG_STATUS, font=("Segoe UI", 8), anchor="w")
         self.status.pack(fill="x", pady=(6, 0))
 
-        # What the model wrote, filled in once it answers.
+        # What the model wrote, filled in once it answers, and open to edit:
+        # the word and the meaning in their entries above, the example here.
         self.result = tk.Frame(body, bg=BG)
         tk.Frame(self.result, bg="#2a3040", height=1).pack(fill="x", pady=(10, 8))
-        self.means = self._text(self.result, FG_OK, (self.font_size + 5, "bold"))
-        self.sentence = self._text(self.result, FG_ORIGINAL, (self.font_size, "italic"))
-        self.sentence_translation = self._text(self.result, FG_TRANSLATION,
-                                               (self.font_size,))
+        self.sentence = self._text(self.result, "example", FG_ORIGINAL,
+                                   (self.font_size, "italic"))
+        self.sentence_translation = self._text(self.result, "its translation",
+                                               FG_TRANSLATION, (self.font_size,))
 
+        self.save_button = self._button(body, "Save changes  (Ctrl+S)",
+                                        self._save, FG_OK)
         self.regenerate_button = self._button(
             body, "Regenerate example for this meaning  (Ctrl+R)",
             self._regenerate, FG_OK)
         self.another_button = self._button(body, "Add another card  (Enter)",
                                            self._another, FG_SENDER)
 
-    def _text(self, parent, colour, font):
-        label = tk.Label(parent, text="", bg=BG, fg=colour, font=("Segoe UI",) + font,
-                         wraplength=400, justify="left", anchor="w")
-        label.pack(fill="x", pady=(0, 6))
-        return label
+    def _text(self, parent, title, colour, font):
+        tk.Label(parent, text=title, bg=BG, fg=FG_STATUS, anchor="w",
+                 font=("Segoe UI", 8)).pack(fill="x", pady=(0, 2))
+        # A Text rather than an Entry: an example runs longer than one line.
+        text = tk.Text(parent, height=2, wrap="word", bg=BG_INPUT, fg=colour,
+                       insertbackground=colour, bd=0, highlightthickness=1,
+                       highlightbackground="#2a3040", highlightcolor=FG_SENDER,
+                       font=("Segoe UI",) + font, width=40, padx=6, pady=4)
+        text.pack(fill="x", pady=(0, 8))
+        # An example is one sentence: Enter saves it rather than breaking it.
+        text.bind("<Return>", self._field_return)
+        return text
+
+    @staticmethod
+    def _text_value(text):
+        return text.get("1.0", "end-1c").strip()
+
+    @staticmethod
+    def _set_text(text, value):
+        state = text.cget("state")
+        text.config(state="normal")
+        text.delete("1.0", "end")
+        text.insert("1.0", value)
+        text.config(state=state)
+
+    def _edits(self):
+        """The preview as it stands: word, meaning, sentence, its translation."""
+        return (self.word.get().strip(), self.meaning.get().strip(),
+                self._text_value(self.sentence),
+                self._text_value(self.sentence_translation))
+
+    def _changed(self):
+        card = self.card
+        if card is None or self.busy:
+            return False
+        return self._edits() != (card.word, card.word_translation, card.sentence,
+                                 card.sentence_translation)
+
+    def _editable(self, on):
+        state = "normal" if on else "disabled"
+        for widget in (self.entry, self.meaning_entry, self.sentence,
+                       self.sentence_translation, self.save_button,
+                       self.regenerate_button):
+            widget.config(state=state)
 
     def _button(self, parent, text, command, colour):
         return tk.Button(parent, text=text, command=command, bg=BG_HEADER, fg=colour,
@@ -868,23 +917,24 @@ class CardAdder:
         if card is not self.card or not self.window or not self.window.winfo_exists():
             return
         self.busy = False
-        failed = "(failed)"
-        self.means.config(text=card.word_translation or failed)
-        self.sentence.config(text=card.sentence or failed)
-        self.sentence_translation.config(text=card.sentence_translation or failed)
-        self.result.pack(fill="x", before=self.another_button)
-        # The meaning stays open to edit: change it, or keep it, and write
-        # the example again.
-        self.meaning_entry.config(state="normal")
+        # Everything stays open to edit: the word in the form it was filed
+        # under, the meaning to keep or to write the example again around.
+        self._editable(True)
+        self.word.set(card.word)
         self.meaning.set(card.word_translation)
+        self._set_text(self.sentence, card.sentence)
+        self._set_text(self.sentence_translation, card.sentence_translation)
+        self.result.pack(fill="x", before=self.another_button)
+        if self.on_save:
+            self.save_button.pack(fill="x", pady=(12, 0), before=self.another_button)
         if self.on_regenerate:
-            self.regenerate_button.config(state="normal")
-            self.regenerate_button.pack(fill="x", pady=(12, 0), before=self.another_button)
+            self.regenerate_button.pack(fill="x", pady=(6 if self.on_save else 12, 0),
+                                        before=self.another_button)
         complete = card.word_translation and card.sentence and card.sentence_translation
-        self.status.config(text="'%s' is in the deck — edit the meaning and "
-                                "regenerate for another example" % card.word if complete
+        self.status.config(text="'%s' is in the deck — edit anything and save, or "
+                                "regenerate the example" % card.word if complete
                            else "'%s' is in the deck, but some of it could not be "
-                           "written — regenerate, or fix it under cards" % card.word,
+                           "written — fill it in and save, or regenerate" % card.word,
                            fg=FG_OK if complete else FG_ERROR)
 
     def _meaning_return(self, _event):
@@ -893,32 +943,70 @@ class CardAdder:
         self._regenerate()
         return "break"
 
+    def _field_return(self, _event):
+        if self.card is None:
+            return None         # still typing: Enter adds the card as usual
+        self._save()
+        return "break"
+
+    def _save(self, quiet=False):
+        """Writes the preview back to the card. Returns False if it could not."""
+        if self.card is None or self.busy or not self.on_save:
+            return True
+        if not self._changed():
+            if not quiet:
+                self.status.config(text="nothing to save", fg=FG_STATUS)
+            return True
+        word, meaning, sentence, rendered = self._edits()
+        if not word:
+            self.status.config(text="the word cannot be empty", fg=FG_ERROR)
+            return False
+        error = self.on_save(self.card, word, meaning, sentence, rendered)
+        if error:
+            self.status.config(text=error, fg=FG_ERROR)
+            return False
+        if not quiet:
+            self.status.config(text="saved '%s'" % self.card.word, fg=FG_OK)
+        return True
+
     def _regenerate(self):
         if self.card is None or self.busy or not self.on_regenerate:
             return
+        # A word edited first is the word the new example is written for.
+        if self.word.get().strip() != self.card.word and not self._save(quiet=True):
+            return
         meaning = self.meaning.get().strip()
         self.busy = True
-        self.meaning_entry.config(state="disabled")
-        self.regenerate_button.config(state="disabled")
+        self._editable(False)
         self.status.config(text="writing a new example for that meaning…" if meaning
                            else "writing the meaning and a new example…",
                            fg=FG_SENDER)
         self.on_regenerate(self.card, meaning)
 
     def _another(self):
+        # Edits not saved yet go with the card rather than vanish.
+        if not self._save(quiet=True):
+            return
         self.card = None
         self.busy = False
         self.result.pack_forget()
+        self.save_button.pack_forget()
         self.regenerate_button.pack_forget()
         self.another_button.pack_forget()
-        self.entry.config(state="normal")
-        self.meaning_entry.config(state="normal")
+        self._editable(True)
         self.add_button.config(state="normal")
         self.word.set("")
         self.meaning.set("")
+        self._set_text(self.sentence, "")
+        self._set_text(self.sentence_translation, "")
         self.status.config(text="type a word to learn", fg=FG_STATUS)
         self._paint_direction()
         self.entry.focus_set()
+
+    def _close(self):
+        # As with the next card: what was edited is kept, unless it cannot be.
+        if self._save(quiet=True):
+            self.window.destroy()
 
 
 class CardEditor:

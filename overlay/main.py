@@ -190,24 +190,36 @@ def main():
         events.put(("status", "making a card for '%s'…" % word, False))
 
         def build():
+            claimed = [word]
             try:
+                # The word as a dictionary lists it: "bloemen" and "de bloem"
+                # are one card, and only the second one is checked for above.
+                entry, kind = translator.headword(word, sentence, source)
+                if cards.headword_key(entry) != cards.headword_key(word):
+                    if not deck.claim(entry, source):
+                        events.put(("status", "'%s' is already in the deck" % entry,
+                                    False))
+                        return
+                    claimed.append(entry)
                 # The sentence first, so the word can be matched to the sense
                 # its translation went with.
                 rendered = translator.translate(sentence, source, target) or ""
                 card = deck.new_card(
-                    word=word,
+                    word=entry,
                     sentence=sentence,
                     word_translation=translator.translate_word(
-                        word, sentence, source, target, rendered=rendered) or "",
+                        entry, sentence, source, target, rendered=rendered,
+                        kind=kind) or "",
                     sentence_translation=rendered,
                     source=source,
                     target=target,
                 )
                 deck.add(card)
                 events.put(("status", "card %d: '%s' — due in %d min"
-                            % (len(deck), word, card.interval // 60), False))
+                            % (len(deck), entry, card.interval // 60), False))
             finally:
-                deck.release(word, source)
+                for each in claimed:
+                    deck.release(each, source)
 
         threading.Thread(target=build, daemon=True).start()
 
@@ -422,7 +434,7 @@ def main():
 
     popup = ui.CardPopup(window.root, on_answer, font_size=int(config["font_size"]),
                          preview=deck.preview, on_skip=on_skip)
-    def fill_card(card, done=None, fresh=False):
+    def fill_card(card, done=None, fresh=False, normalize=False):
         """Fills in whatever a hand-typed card was left missing.
 
         A card typed in by hand is usually just a word, so the example sentence
@@ -431,9 +443,18 @@ def main():
         own it picks whichever sense comes to mind, which need not be the one
         the sentence and its translation went with. `fresh` writes a new
         example even when one for this word and meaning was written before.
+        `normalize` first turns the word into its dictionary form, for a word
+        just typed in rather than one already fixed up under cards.
         """
         def run():
             source, target = card.source, card.target
+            kind = None
+            if normalize:
+                entry, kind = translator.headword(card.word, card.sentence, source)
+                # A form already in the deck stays as typed: one card too many
+                # is better than two cards under the same word.
+                if not deck.has_word(entry, source):
+                    card.word = entry
             # A meaning typed in by hand steers both the example and its
             # translation onto that sense.
             meaning = card.word_translation
@@ -458,7 +479,7 @@ def main():
             if not card.word_translation:
                 card.word_translation = translator.translate_word(
                     card.word, card.sentence or card.word, source, target,
-                    rendered=card.sentence_translation) or ""
+                    rendered=card.sentence_translation, kind=kind) or ""
             deck.save()
             window.root.after(0, lambda: filled(card, done))
 
@@ -485,7 +506,7 @@ def main():
                              source=source, target=target)
         deck.add(card)
         deck.release(word, source)
-        fill_card(card, done=adder.show_card)
+        fill_card(card, done=adder.show_card, normalize=True)
         return card, None
 
     def regenerate_card(card, meaning):
@@ -496,9 +517,25 @@ def main():
         card.sentence_translation = ""
         fill_card(card, done=adder.show_card, fresh=True)
 
+    def save_card(card, word, meaning, sentence, sentence_translation):
+        """Keeps what was edited in the new-card window. Returns an error or None."""
+        # Another card may already hold the word typed in; this one is free to
+        # keep its own word in another spelling.
+        if (cards.headword_key(word) != cards.headword_key(card.word)
+                and deck.has_word(word, card.source)):
+            return "'%s' is already in the deck" % word
+        card.word = word
+        card.word_translation = meaning
+        card.sentence = sentence
+        card.sentence_translation = sentence_translation
+        deck.save()
+        if editor.window is not None and editor.window.winfo_exists():
+            editor.reload()
+        return None
+
     adder = ui.CardAdder(
         window.root, add_card, font_size=int(config["font_size"]),
-        on_regenerate=regenerate_card,
+        on_regenerate=regenerate_card, on_save=save_card,
         direction=lambda: (config["chat_language"], config["my_language"]))
 
     editor = ui.CardEditor(
