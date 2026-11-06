@@ -243,6 +243,13 @@ local function OnUpdate(_self, elapsed)
 end
 
 local function OnChat(event, text, sender, _language, channelName)
+    -- Clients on the modern engine (Forever) can hand chat over as secret
+    -- values that error on any string operation. Those lines are unreadable
+    -- to addons anyway, so drop them.
+    if issecretvalue and (issecretvalue(text) or issecretvalue(sender)
+                          or issecretvalue(channelName)) then
+        return
+    end
     if not ChatPixelBridgeDB.enabled or not text or text == "" then return end
 
     local label = LABEL[event]

@@ -114,7 +114,7 @@ def save_config(config):
 
 # What the window owns and nothing else does. Everything else in the file
 # belongs to the settings dialog, which writes it the moment it changes.
-LAYOUT_KEYS = ("geometry", "compose_geometry", "chat_log_path")
+LAYOUT_KEYS = ("geometry", "compose_geometry")
 
 
 def save_layout(config):
@@ -370,7 +370,8 @@ def main():
                                "WoWChatLog.txt not found. Type /chatlog in game once, "
                                "then set the chat log path in settings.")
             return
-        config["chat_log_path"] = path
+        # A detected path stays out of the config: pinning it would keep
+        # reading one client after you switch to another.
         if reader[0]:
             reader[0].close()
         reader[0] = chatlog.LogReader(path, from_start=True)

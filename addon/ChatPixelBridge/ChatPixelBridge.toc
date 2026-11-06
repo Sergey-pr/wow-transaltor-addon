@@ -1,4 +1,4 @@
-## Interface: 20504
+## Interface: 20505, 16001
 ## Title: Chat Pixel Bridge
 ## Notes: Draws incoming chat as a strip of coloured cells the translator overlay reads back off the screen.
 ## Author: sergei

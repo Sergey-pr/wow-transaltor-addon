@@ -384,6 +384,8 @@ def find_claude(configured=""):
     if local:
         roots.append(os.path.join(local, "Packages", "Claude_*", "LocalCache",
                                   "Roaming", "Claude", "claude-code"))
+        # Newer Store builds moved their data out of the package folder.
+        roots.append(os.path.join(local, "Claude-Data", "claude_*", "claude-code"))
     appdata = os.environ.get("APPDATA")
     if appdata:
         roots.append(os.path.join(appdata, "Claude", "claude-code"))

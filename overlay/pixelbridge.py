@@ -8,6 +8,7 @@ Layout and encoding are fixed on both sides; see the addon for the other half.
 """
 
 import math
+import re
 
 import screengrab
 
@@ -107,12 +108,17 @@ class Bridge:
             offset = (py * width + px) * 4
             return data[offset + 2], data[offset + 1], data[offset]
 
-        needle = bytes((0, 0, 255))          # BGR of pure red
+        # BGR of red, give or take: the Forever client draws 0 as 1, so an
+        # exact byte match finds nothing there.
+        low = re.escape(bytes((MARKER_TOLERANCE,)))
+        high = re.escape(bytes((255 - MARKER_TOLERANCE,)))
+        needle = re.compile(b"[\\x00-" + low + b"][\\x00-" + low + b"][" + high + b"-\\xff]")
         start = 0
         while True:
-            found = data.find(needle, start)
-            if found < 0:
+            match = needle.search(data, start)
+            if match is None:
                 return False
+            found = match.start()
             start = found + 1
             if found % 4:                    # not aligned to a pixel boundary
                 continue

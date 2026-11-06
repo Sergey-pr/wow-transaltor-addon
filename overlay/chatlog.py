@@ -5,7 +5,7 @@ import re
 from dataclasses import dataclass
 
 # Where Blizzard installs WoW by default. The flavor folder differs per client:
-# Anniversary TBC is usually _classic_, Era is _classic_era_.
+# Anniversary TBC is _anniversary_, WoW Forever is _forever_, Era is _classic_era_.
 SEARCH_ROOTS = [
     r"C:\Program Files (x86)\World of Warcraft",
     r"C:\Program Files\World of Warcraft",
@@ -18,7 +18,7 @@ SEARCH_ROOTS = [
     r"E:\Games\World of Warcraft",
 ]
 
-FLAVORS = ["_anniversary_", "_classic_", "_classic_era_", "_classic_ptr_", "_retail_"]
+FLAVORS = ["_anniversary_", "_forever_", "_classic_", "_classic_era_", "_classic_ptr_", "_retail_"]
 
 
 def find_chat_log():

@@ -125,7 +125,8 @@ package never has tkinter, so don't use it.
 ### 4. The addons
 
 Copy both folders into your client's `Interface\AddOns\`. The flavour folder
-depends on the client — Anniversary is `_anniversary_`:
+depends on the client — Anniversary is `_anniversary_`, WoW Forever is
+`_forever_`:
 
 ```
 World of Warcraft\_anniversary_\Interface\AddOns\ChatPixelBridge\
@@ -133,8 +134,13 @@ World of Warcraft\_anniversary_\Interface\AddOns\ChatLogAuto\
 ```
 
 If the character screen marks them out of date, tick "Load out of date addons".
-The `.toc` says `## Interface: 20504`; to get the exact number for your build,
-type `/dump select(4, GetBuildInfo())` in game and put it in the `.toc`.
+The `.toc` says `## Interface: 20505, 16001` — Anniversary and Forever. To get
+the exact number for your build, type `/dump select(4, GetBuildInfo())` in game
+and add it to that list.
+
+Forever runs on the modern engine, which can hide some chat from addons as
+"secret" values. The bridge skips those lines rather than erroring, so a
+message missing from the feed there may simply be one the client withheld.
 
 `ChatPixelBridge` draws a 132×36 strip in the very top-left corner. **Nothing
 may cover it** — not the overlay window, not a UI addon, or the live feed

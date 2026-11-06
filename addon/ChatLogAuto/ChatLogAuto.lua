@@ -10,6 +10,9 @@ local function Say(msg)
 end
 
 local function Apply()
+    -- Not every client build is guaranteed to keep this global; without it
+    -- the pixel bridge is the only feed, so stay quiet rather than error.
+    if not LoggingChat then return end
     if ChatLogAutoDB.enabled then
         LoggingChat(true)
     else
